@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package ml_models;
+
+// Service definition for ML model operations
+service MLModelService {
+    // Text embedding operations
+    rpc EmbedSentence (EmbedSentenceRequest) returns (EmbedSentenceResponse);
+    rpc EmbedBatch (EmbedBatchRequest) returns (EmbedBatchResponse);
+    
+    // Document reranking
+    rpc RerankDocuments (RerankDocumentsRequest) returns (RerankDocumentsResponse);
+    
+    // Prompt operations
+    rpc RewritePrompt (RewritePromptRequest) returns (RewritePromptResponse);
+    rpc CompressPrompt (CompressPromptRequest) returns (CompressPromptResponse);
+    
+    // Server management
+    rpc GetMemoryInfo (GetMemoryInfoRequest) returns (GetMemoryInfoResponse);
+    rpc CleanupModels (CleanupModelsRequest) returns (CleanupModelsResponse);
+    rpc WarmupModels (WarmupModelsRequest) returns (WarmupModelsResponse);
+    
+    // Health and status
+    rpc GetServerStatus (GetServerStatusRequest) returns (GetServerStatusResponse);
+}
+
+// ================================
+// Embedding Service Messages
+// ================================
+
+message EmbedSentenceRequest {
+    string sentence = 1;
+}
+
+message EmbedSentenceResponse {
+    repeated float embedding = 1;
+    bool success = 2;
+    string error_message = 3;
+}
+
+message EmbedBatchRequest {
+    repeated string sentences = 1;
+}
+
+message EmbedBatchResponse {
+    repeated FloatArray embeddings = 1;  // Array of embeddings
+    bool success = 2;
+    string error_message = 3;
+    int32 processed_count = 4;
+    int32 failed_count = 5;
+}
+
+message FloatArray {
+    repeated float values = 1;
+}
+
+// ================================
+// Reranking Service Messages
+// ================================
+
+message RerankDocumentsRequest {
+    string query = 1;
+    repeated string documents = 2;
+    int32 max_batch_size = 3;  // Optional batch size limit
+}
+
+message RerankDocumentsResponse {
+    repeated float scores = 1;
+    bool success = 2;
+    string error_message = 3;
+    int32 processed_count = 4;
+}
+
+// ================================
+// Prompt Operations Messages
+// ================================
+
+message RewritePromptRequest {
+    string prompt = 1;
+    int32 max_length = 2;      // Default: 16384
+    float temperature = 3;      // Default: 0.7
+    bool do_sample = 4;        // Default: true
+    int32 num_sequences = 5;   // Default: 1
+}
+
+message RewritePromptResponse {
+    string rewritten_prompt = 1;
+    bool success = 2;
+    string error_message = 3;
+    int32 input_length = 4;
+    int32 output_length = 5;
+}
+
+message CompressPromptRequest {
+    string prompt = 1;              // The question/prompt
+    repeated string documents = 2;   // Context documents to compress
+    float compression_rate = 3;     // Default: 0.33
+    repeated string force_tokens = 4; // Tokens to preserve
+}
+
+message CompressPromptResponse {
+    string compressed_prompt = 1;
+    float compression_ratio = 2;
+    int32 original_tokens = 3;
+    int32 compressed_tokens = 4;
+    bool success = 5;
+    string error_message = 6;
+    map<string, string> metadata = 7;  // Additional compression metadata
+}
+
+// ================================
+// Server Management Messages
+// ================================
+
+message GetMemoryInfoRequest {
+    bool include_detailed_stats = 1;  // Include per-model breakdown
+}
+
+message GetMemoryInfoResponse {
+    MemoryInfo memory_info = 1;
+    bool success = 2;
+    string error_message = 3;
+}
+
+message MemoryInfo {
+    float ram_usage_gb = 1;
+    float ram_percent = 2;
+    float gpu_allocated_gb = 3;
+    float gpu_reserved_gb = 4;
+    float gpu_free_gb = 5;
+    int64 timestamp = 6;
+    repeated ModelMemoryInfo model_details = 7;  // Optional detailed breakdown
+}
+
+message ModelMemoryInfo {
+    string model_name = 1;
+    bool is_loaded = 2;
+    float estimated_memory_gb = 3;
+    int64 load_time = 4;
+    int64 last_used = 5;
+}
+
+message CleanupModelsRequest {
+    repeated string specific_models = 1;  // If empty, cleanup all
+    bool force_cleanup = 2;               // Force cleanup even if recently used
+}
+
+message CleanupModelsResponse {
+    bool success = 1;
+    string error_message = 2;
+    repeated string cleaned_models = 3;
+    float memory_freed_gb = 4;
+}
+
+message WarmupModelsRequest {
+    repeated string models = 1;  // Models to warm up, if empty = all models
+    bool parallel_loading = 2;   // Load models in parallel (default: true)
+    int32 timeout_seconds = 3;   // Timeout per model (default: 300)
+}
+
+message WarmupModelsResponse {
+    bool success = 1;
+    string error_message = 2;
+    repeated ModelWarmupResult results = 3;
+    int32 total_time_seconds = 4;
+}
+
+message ModelWarmupResult {
+    string model_name = 1;
+    bool success = 2;
+    string error_message = 3;
+    int32 load_time_seconds = 4;
+    float memory_used_gb = 5;
+}
+
+// ================================
+// Health and Status Messages
+// ================================
+
+message GetServerStatusRequest {
+    bool include_model_status = 1;
+    bool include_performance_stats = 2;
+}
+
+message GetServerStatusResponse {
+    ServerStatus status = 1;
+    bool success = 2;
+    string error_message = 3;
+}
+
+message ServerStatus {
+    string server_version = 1;
+    int64 uptime_seconds = 2;
+    int64 total_requests = 3;
+    float avg_response_time_ms = 4;
+    MemoryInfo current_memory = 5;
+    repeated ModelStatus model_statuses = 6;
+    PerformanceStats performance = 7;
+}
+
+message ModelStatus {
+    string model_name = 1;
+    bool is_loaded = 2;
+    int64 request_count = 3;
+    float avg_inference_time_ms = 4;
+    int64 last_used_timestamp = 5;
+    string status = 6;  // "ready", "loading", "error", "unloaded"
+}
+
+message PerformanceStats {
+    int64 embedding_requests = 1;
+    int64 reranking_requests = 2;
+    int64 prompt_rewrite_requests = 3;
+    int64 prompt_compression_requests = 4;
+    float avg_embedding_time_ms = 5;
+    float avg_reranking_time_ms = 6;
+    float avg_rewrite_time_ms = 7;
+    float avg_compression_time_ms = 8;
+    int64 error_count = 9;
+}
+
+// ================================
+// Common/Utility Messages
+// ================================
+
+message Empty {
+    // Used for requests that don't need parameters
+}
+
+// Streaming support for large batch operations
+message StreamEmbedRequest {
+    oneof request_type {
+        EmbedBatchRequest batch_request = 1;
+        string sentence = 2;  // Single sentence for streaming
+    }
+}
+
+message StreamEmbedResponse {
+    oneof response_type {
+        FloatArray embedding = 1;      // Single embedding result
+        string error_message = 2;      // Error for this item
+        int32 batch_progress = 3;      // Progress indicator (0-100)
+    }
+    int32 sequence_id = 4;  // To maintain order in streaming
+}
+
+// Configuration message for model parameters
+message ModelConfig {
+    string model_name = 1;
+    string model_path = 2;
+    map<string, string> parameters = 3;  // Model-specific parameters
+    string device = 4;  // "cuda", "cpu", "auto"
+    bool use_fp16 = 5;
+    int32 max_batch_size = 6;
+}
