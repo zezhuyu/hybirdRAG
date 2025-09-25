@@ -192,12 +192,18 @@ class HybridRAGPipeline:
             results = [graph_answer] + vector_texts
 
         if compress:
-            compressed_result = self.service.compress_prompt(query_text, results)
+            # Only compress the vector texts, not the GraphRAG answer (which can be garbled)
+            texts_to_compress = vector_texts if vector_texts else results
+            compressed_result = self.service.compress_prompt(query_text, texts_to_compress)
             print(f"🔍 Debug: Compression result: {compressed_result[:100] if compressed_result else 'None'}...")
             # If compression fails or returns empty, return the original results
             if compressed_result and compressed_result.strip():
-                # Return both compressed summary and top original results for better context
-                return [compressed_result] + results[:3]  # Compressed summary + top 3 original results
+                # Return compressed summary + GraphRAG answer (if available) + top vector results
+                final_results = [compressed_result]
+                if graph_answer is not None:
+                    final_results.append(graph_answer)
+                final_results.extend(vector_texts[:2])  # Top 2 vector results
+                return final_results
             else:
                 print("⚠️  Compression failed or returned empty, returning original results")
                 return results
