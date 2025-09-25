@@ -153,10 +153,13 @@ class HybridRAGPipeline:
         # Try to get graph answer, but handle gracefully if it fails
         try:
             graph_answer = self.graph_rag.query(query_text)
+            # Only include graph answer if it's not empty
+            if not graph_answer or not graph_answer.strip():
+                graph_answer = None
         except Exception as e:
             print(f"⚠️  GraphRAG query failed: {e}")
             print("Continuing with vector-only search...")
-            graph_answer = ""
+            graph_answer = None
 
         # Handle HybridHits objects from Milvus
         vector_texts = []
@@ -183,14 +186,18 @@ class HybridRAGPipeline:
         if rerank and vector_texts:
             vector_texts = self.service.rerank_documents(vector_texts, query_text)
 
-        results = [graph_answer] + vector_texts
+        # Only include graph_answer if it's not None
+        results = vector_texts
+        if graph_answer is not None:
+            results = [graph_answer] + vector_texts
 
         if compress:
             compressed_result = self.service.compress_prompt(query_text, results)
             print(f"🔍 Debug: Compression result: {compressed_result[:100] if compressed_result else 'None'}...")
             # If compression fails or returns empty, return the original results
             if compressed_result and compressed_result.strip():
-                return [compressed_result]
+                # Return both compressed summary and top original results for better context
+                return [compressed_result] + results[:3]  # Compressed summary + top 3 original results
             else:
                 print("⚠️  Compression failed or returned empty, returning original results")
                 return results

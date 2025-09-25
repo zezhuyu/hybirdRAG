@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 from llama_index.core import PropertyGraphIndex, StorageContext
 from llama_index.core.llms import LLM
 from llama_index.core.schema import BaseNode
-# Use SimpleVectorStore as the base, but we'll connect it to Milvus data
-from llama_index.core.vector_stores.simple import SimpleVectorStore as MilvusVectorStore
+# Use our fixed SimpleVectorStore that properly populates result.nodes
+from .fixed_vector_store import FixedSimpleVectorStore as MilvusVectorStore
 
 from .extractor import GraphRAGExtractor
 from .query import GraphRAGQueryEngine
@@ -25,51 +25,51 @@ For each entity, extract: entity_name, entity_type, entity_description
 For each relationship, extract: source_entity, target_entity, relation, relationship_description
 
 Return ONLY this JSON format (no other text):
-{
+{{
   "entities": [
-    {"entity_name": "Entity Name", "entity_type": "Type", "entity_description": "Description"}
+    {{"entity_name": "Entity Name", "entity_type": "Type", "entity_description": "Description"}}
   ],
   "relationships": [
-    {"source_entity": "Source", "target_entity": "Target", "relation": "Relation", "relationship_description": "Description"}
+    {{"source_entity": "Source", "target_entity": "Target", "relation": "Relation", "relationship_description": "Description"}}
   ]
-}
+}}
 
-If none found, return: {"entities": [], "relationships": []}
+If none found, return: {{"entities": [], "relationships": []}}
 
 -An Output Example-
-{
+{{
   "entities": [
-    {
+    {{
       "entity_name": "Albert Einstein",
       "entity_type": "Person",
       "entity_description": "Albert Einstein was a theoretical physicist who developed the theory of relativity and made significant contributions to physics."
-    },
-    {
+    }},
+    {{
       "entity_name": "Theory of Relativity",
       "entity_type": "Scientific Theory",
       "entity_description": "A scientific theory developed by Albert Einstein, describing the laws of physics in relation to observers in different frames of reference."
-    },
-    {
+    }},
+    {{
       "entity_name": "Nobel Prize in Physics",
       "entity_type": "Award",
       "entity_description": "A prestigious international award in the field of physics, awarded annually by the Royal Swedish Academy of Sciences."
-    }
+    }}
   ],
   "relationships": [
-    {
+    {{
       "source_entity": "Albert Einstein",
       "target_entity": "Theory of Relativity",
       "relation": "developed",
       "relationship_description": "Albert Einstein is the developer of the theory of relativity."
-    },
-    {
+    }},
+    {{
       "source_entity": "Albert Einstein",
       "target_entity": "Nobel Prize in Physics",
       "relation": "won",
       "relationship_description": "Albert Einstein won the Nobel Prize in Physics in 1921."
-    }
+    }}
   ]
-}
+}}
 
 -Real Data-
 ######################
@@ -238,17 +238,31 @@ class GraphRAGPipeline:
                     "to construct one."
                 )
             self.vector_store = MilvusVectorStore(**milvus_kwargs)
+        
+        # Ensure the vector store has access to the embedding model
+        if embedding_model:
+            self.vector_store._embed_model = embedding_model
 
         self.storage_context = StorageContext.from_defaults(
             graph_store=self.graph_store,
             vector_store=self.vector_store,
         )
+        
+        # Set the docstore on the vector store so it can populate result.nodes
+        if hasattr(self.vector_store, 'set_docstore'):
+            self.vector_store.set_docstore(self.storage_context.docstore)
+        
+        # Fix the VectorContextRetriever bug: patch the supports_vector_queries check
+        self._patch_vector_context_retriever()
 
         # Set the LLM and embeddings in global settings for all llama-index operations
         from llama_index.core import Settings
         Settings.llm = llm
         if embedding_model:
             Settings.embed_model = embedding_model
+            # Also set it on the vector store for direct access
+            if hasattr(self.vector_store, '_embed_model'):
+                self.vector_store._embed_model = embedding_model
 
         self.kg_extractor = GraphRAGExtractor(
             llm=llm,
@@ -343,6 +357,10 @@ class GraphRAGPipeline:
     def _build_index_from_milvus(self):
         """Build GraphRAG index from Milvus documents."""
         try:
+            # First sync the vector store with Milvus data
+            print("🔄 Syncing vector store with Milvus data before building index...")
+            self._sync_vector_store_with_milvus()
+            
             from llama_index.core.schema import TextNode
             
             # Get collection info
@@ -445,3 +463,158 @@ class GraphRAGPipeline:
                 similarity_top_k=10,
             )
         return self.query_engine.custom_query(query)
+    
+    def _patch_vector_context_retriever(self):
+        """Patch the VectorContextRetriever to fix the supports_vector_queries bug."""
+        try:
+            from llama_index.core.indices.property_graph.sub_retrievers.vector import VectorContextRetriever
+            
+            # Store the original methods
+            original_retrieve_from_graph = VectorContextRetriever.retrieve_from_graph
+            original_aretrieve_from_graph = VectorContextRetriever.aretrieve_from_graph
+            
+            def patched_retrieve_from_graph(self, query_bundle, limit=None):
+                """Patched version that correctly calls supports_vector_queries()."""
+                from llama_index.core.vector_stores.types import VectorStoreQuery
+                from llama_index.core.schema import NodeWithScore
+                
+                vector_store_query = self._get_vector_store_query(query_bundle)
+
+                triplets = []
+                kg_ids = []
+                new_scores = []
+                
+                # FIXED: Call supports_vector_queries() instead of just checking if it exists
+                if self._graph_store.supports_vector_queries():
+                    result = self._graph_store.vector_query(vector_store_query)
+                    if len(result) != 2:
+                        raise ValueError("No nodes returned by vector_query")
+                    kg_nodes, scores = result
+
+                    kg_ids = [node.id for node in kg_nodes]
+                    triplets = self._graph_store.get_rel_map(
+                        kg_nodes,
+                        depth=self._path_depth,
+                        limit=limit or self._limit,
+                        ignore_rels=["__kg_source__"],
+                    )
+
+                elif self._vector_store is not None:
+                    query_result = self._vector_store.query(vector_store_query)
+                    if query_result.nodes is not None and query_result.similarities is not None:
+                        kg_ids = self._get_kg_ids(query_result.nodes)
+                        scores = query_result.similarities
+                        kg_nodes = self._graph_store.get(ids=kg_ids)
+                        triplets = self._graph_store.get_rel_map(
+                            kg_nodes,
+                            depth=self._path_depth,
+                            limit=limit or self._limit,
+                            ignore_rels=["__kg_source__"],
+                        )
+
+                    elif query_result.ids is not None and query_result.similarities is not None:
+                        kg_ids = query_result.ids
+                        scores = query_result.similarities
+                        kg_nodes = self._graph_store.get(ids=kg_ids)
+                        triplets = self._graph_store.get_rel_map(
+                            kg_nodes,
+                            depth=self._path_depth,
+                            limit=limit or self._limit,
+                            ignore_rels=["__kg_source__"],
+                        )
+
+                # Rest of the method remains the same
+                for triplet in triplets:
+                    score1 = (
+                        scores[kg_ids.index(triplet[0].id)] if triplet[0].id in kg_ids else 0.0
+                    )
+                    score2 = (
+                        scores[kg_ids.index(triplet[2].id)] if triplet[2].id in kg_ids else 0.0
+                    )
+                    new_scores.append((score1 + score2) / 2.0)
+
+                nodes = []
+                for i, triplet in enumerate(triplets):
+                    node = NodeWithScore(
+                        node=triplet[1], score=new_scores[i]
+                    )  # triplet[1] is the relation
+                    nodes.append(node)
+
+                return nodes
+            
+            async def patched_aretrieve_from_graph(self, query_bundle, limit=None):
+                """Patched async version that correctly calls supports_vector_queries()."""
+                from llama_index.core.vector_stores.types import VectorStoreQuery
+                from llama_index.core.schema import NodeWithScore
+                
+                vector_store_query = self._get_vector_store_query(query_bundle)
+
+                triplets = []
+                kg_ids = []
+                new_scores = []
+                
+                # FIXED: Call supports_vector_queries() instead of just checking if it exists
+                if self._graph_store.supports_vector_queries():
+                    result = self._graph_store.vector_query(vector_store_query)
+                    if len(result) != 2:
+                        raise ValueError("No nodes returned by vector_query")
+                    kg_nodes, scores = result
+
+                    kg_ids = [node.id for node in kg_nodes]
+                    triplets = self._graph_store.get_rel_map(
+                        kg_nodes,
+                        depth=self._path_depth,
+                        limit=limit or self._limit,
+                        ignore_rels=["__kg_source__"],
+                    )
+
+                elif self._vector_store is not None:
+                    query_result = self._vector_store.query(vector_store_query)
+                    if query_result.nodes is not None and query_result.similarities is not None:
+                        kg_ids = self._get_kg_ids(query_result.nodes)
+                        scores = query_result.similarities
+                        kg_nodes = self._graph_store.get(ids=kg_ids)
+                        triplets = self._graph_store.get_rel_map(
+                            kg_nodes,
+                            depth=self._path_depth,
+                            limit=limit or self._limit,
+                            ignore_rels=["__kg_source__"],
+                        )
+
+                    elif query_result.ids is not None and query_result.similarities is not None:
+                        kg_ids = query_result.ids
+                        scores = query_result.similarities
+                        kg_nodes = self._graph_store.get(ids=kg_ids)
+                        triplets = self._graph_store.get_rel_map(
+                            kg_nodes,
+                            depth=self._path_depth,
+                            limit=limit or self._limit,
+                            ignore_rels=["__kg_source__"],
+                        )
+
+                # Rest of the method remains the same
+                for triplet in triplets:
+                    score1 = (
+                        scores[kg_ids.index(triplet[0].id)] if triplet[0].id in kg_ids else 0.0
+                    )
+                    score2 = (
+                        scores[kg_ids.index(triplet[2].id)] if triplet[2].id in kg_ids else 0.0
+                    )
+                    new_scores.append((score1 + score2) / 2.0)
+
+                nodes = []
+                for i, triplet in enumerate(triplets):
+                    node = NodeWithScore(
+                        node=triplet[1], score=new_scores[i]
+                    )  # triplet[1] is the relation
+                    nodes.append(node)
+
+                return nodes
+            
+            # Apply the patches
+            VectorContextRetriever.retrieve_from_graph = patched_retrieve_from_graph
+            VectorContextRetriever.aretrieve_from_graph = patched_aretrieve_from_graph
+            print("✅ Patched VectorContextRetriever (both sync and async) to fix supports_vector_queries bug")
+            
+        except Exception as e:
+            print(f"⚠️  Failed to patch VectorContextRetriever: {e}")

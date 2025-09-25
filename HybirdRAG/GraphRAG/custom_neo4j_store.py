@@ -48,7 +48,7 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         if self._driver:
             self._driver.close()
     
-    def get(self, subj: str = None, ids: List[str] = None) -> List[str]:
+    def get(self, subj: str = None, ids: List[str] = None) -> List[EntityNode]:
         """Get all objects that are connected to the subject or by IDs."""
         if ids is not None:
             # Handle the case where PropertyGraphIndex calls get(ids=list_of_ids)
@@ -59,7 +59,36 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
             return []
         
         if subj is None:
-            return []
+            # Return all entity nodes when no specific subject is provided
+            query = "MATCH (n) WHERE n.name IS NOT NULL RETURN n.name as name, labels(n) as labels, n.description as description, n.properties as properties"
+            result = self._session.run(query)
+            entities = []
+            for record in result:
+                name = record["name"]
+                labels = record["labels"] if record["labels"] else []
+                description = record["description"] or ""
+                properties_str = record["properties"] or "{}"
+                
+                # Parse properties if it's a string
+                try:
+                    if isinstance(properties_str, str):
+                        properties = json.loads(properties_str)
+                    else:
+                        properties = properties_str or {}
+                except:
+                    properties = {}
+                
+                # Add basic properties
+                properties["entity_description"] = description
+                properties["entity_type"] = labels[0] if labels else "Unknown"
+                
+                entity = EntityNode(
+                    name=name,
+                    label=labels[0] if labels else "Unknown",
+                    properties=properties
+                )
+                entities.append(entity)
+            return entities
             
         query = "MATCH (s {name: $subj})-[:RELATED_TO]->(o) RETURN o.name as obj_name"
         result = self._session.run(query, subj=subj)
@@ -184,7 +213,7 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         query = """
         MATCH (s)-[r]->(o)
         RETURN s.name as source_name, labels(s) as source_labels, properties(s) as source_properties,
-               type(r) as relation_type, properties(r) as relation_properties,
+               r.relationship as relation_label, r.description as relation_description, properties(r) as relation_properties,
                o.name as target_name, labels(o) as target_labels, properties(o) as target_properties
         """
         try:
@@ -201,11 +230,20 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
                     label=record["target_labels"][0] if record["target_labels"] else "Node",
                     properties=record["target_properties"]
                 )
+                
+                # Use the stored relationship label and description
+                relation_label = record["relation_label"] or "RELATED_TO"
+                relation_description = record["relation_description"] or ""
+                
+                # Create properties dict with the description
+                relation_properties = record["relation_properties"] or {}
+                relation_properties["relationship_description"] = relation_description
+                
                 relation = Relation(
-                    label=record["relation_type"],
+                    label=relation_label,
                     source_id=record["source_name"],
                     target_id=record["target_name"],
-                    properties=record["relation_properties"]
+                    properties=relation_properties
                 )
                 triplets.append((source_node, relation, target_node))
             return triplets
