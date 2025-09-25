@@ -69,7 +69,7 @@ class GraphRAGStore(CustomNeo4jPropertyGraphStore):
         clean_response = re.sub(r"^assistant:\s*", "", str(response)).strip()
         return clean_response
 
-    def build_communities(self):
+    def build_communities(self, max_workers=10):
         """Builds communities from the graph and summarizes them."""
         nx_graph = self._create_nx_graph()
         if nx_graph.number_of_nodes() == 0:
@@ -82,7 +82,7 @@ class GraphRAGStore(CustomNeo4jPropertyGraphStore):
         self.entity_info, community_info = self._collect_community_info(
             nx_graph, community_hierarchical_clusters
         )
-        self._summarize_communities(community_info)
+        self._summarize_communities(community_info, max_workers=max_workers)
 
     def _create_nx_graph(self):
         """Converts internal graph representation to NetworkX graph."""
@@ -141,18 +141,71 @@ class GraphRAGStore(CustomNeo4jPropertyGraphStore):
 
         return dict(entity_info), dict(community_info)
 
-    def _summarize_communities(self, community_info):
-        """Generate and store summaries for each community."""
-        for community_id, details in community_info.items():
-            details_text = (
-                "\n".join(details) + "."
-            )  # Ensure it ends with a period
-            self.community_summary[
-                community_id
-            ] = self.generate_community_summary(details_text)
+    def _summarize_communities(self, community_info, max_workers=5):
+        """Generate and store summaries for each community using parallel processing."""
+        import concurrent.futures
+        import threading
+        from typing import Dict, Tuple
+        
+        print(f"🔄 Generating summaries for {len(community_info)} communities...")
+        
+        # Limit the number of communities to summarize to improve performance
+        max_communities = 30  # Reduced for better performance
+        sorted_communities = sorted(
+            community_info.items(), 
+            key=lambda x: len(x[1]), 
+            reverse=True
+        )[:max_communities]
+        
+        def process_community(community_data: Tuple[str, list]) -> Tuple[str, str]:
+            """Process a single community and return (community_id, summary)."""
+            community_id, details = community_data
+            details_text = "\n".join(details) + "."  # Ensure it ends with a period
+            try:
+                summary = self.generate_community_summary(details_text)
+                return community_id, summary
+            except Exception as e:
+                print(f"⚠️  Failed to summarize community {community_id}: {e}")
+                return community_id, f"Error generating summary: {str(e)}"
+        
+        # Use ThreadPoolExecutor for parallel processing
+        # max_workers is now a parameter with default value of 5
+        completed = 0
+        import time
+        start_time = time.time()
+        
+        print(f"🚀 Processing {len(sorted_communities)} communities in parallel with {max_workers} workers...")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_community = {
+                executor.submit(process_community, community_data): community_data[0]
+                for community_data in sorted_communities
+            }
+            
+            print(f"   🚀 Started {len(sorted_communities)} tasks with {max_workers} workers...")
+            
+            # Process completed tasks as they finish
+            for future in concurrent.futures.as_completed(future_to_community):
+                community_id = future_to_community[future]
+                try:
+                    result_id, summary = future.result()
+                    self.community_summary[result_id] = summary
+                    completed += 1
+                    # Show progress more frequently to demonstrate parallel processing
+                    if completed % 3 == 0 or completed == len(sorted_communities):  
+                        elapsed = time.time() - start_time
+                        rate = completed / elapsed if elapsed > 0 else 0
+                        print(f"   ✅ Completed {completed}/{len(sorted_communities)} communities ({rate:.1f} communities/sec, parallel processing active)...")
+                except Exception as e:
+                    print(f"⚠️  Error processing community {community_id}: {e}")
+                    completed += 1
+        
+        print(f"✅ Generated {len(self.community_summary)} community summaries using parallel processing")
 
-    def get_community_summaries(self):
+    def get_community_summaries(self, max_workers=10):
         """Returns the community summaries, building them if not already done."""
         if not self.community_summary:
-            self.build_communities()
+            print("🔄 Building communities (this may take a while on first run)...")
+            self.build_communities(max_workers=max_workers)
         return self.community_summary
