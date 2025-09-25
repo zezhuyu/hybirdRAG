@@ -1,8 +1,11 @@
-from llama_index.core.query_engine import CustomQueryEngine
-from llama_index.core.llms import LLM
-from llama_index.core import PropertyGraphIndex
-
 import re
+from typing import List
+
+from llama_index.core import PropertyGraphIndex
+from llama_index.core.llms import ChatMessage, LLM
+from llama_index.core.query_engine import CustomQueryEngine
+
+from .store import GraphRAGStore
 
 
 class GraphRAGQueryEngine(CustomQueryEngine):
@@ -26,15 +29,18 @@ class GraphRAGQueryEngine(CustomQueryEngine):
             if id in community_ids
         ]
 
+        if not community_answers:
+            return "No relevant communities found for the query."
+
         final_answer = self.aggregate_answers(community_answers)
         return final_answer
 
-    def get_entities(self, query_str, similarity_top_k):
+    def get_entities(self, query_str: str, similarity_top_k: int) -> List[str]:
         nodes_retrieved = self.index.as_retriever(
             similarity_top_k=similarity_top_k
         ).retrieve(query_str)
 
-        enitites = set()
+        entities = set()
         pattern = (
             r"^(\w+(?:\s+\w+)*)\s*->\s*([a-zA-Z\s]+?)\s*->\s*(\w+(?:\s+\w+)*)$"
         )
@@ -47,10 +53,10 @@ class GraphRAGQueryEngine(CustomQueryEngine):
             for match in matches:
                 subject = match[0]
                 obj = match[2]
-                enitites.add(subject)
-                enitites.add(obj)
+                entities.add(subject)
+                entities.add(obj)
 
-        return list(enitites)
+        return list(entities)
 
     def retrieve_entity_communities(self, entity_info, entities):
         """

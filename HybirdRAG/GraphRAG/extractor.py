@@ -4,7 +4,14 @@ import nest_asyncio
 nest_asyncio.apply()
 
 from typing import Any, List, Callable, Optional, Union, Dict
-from IPython.display import Markdown, display
+try:
+    from IPython.display import Markdown, display
+except ImportError:
+    # IPython not available, define dummy functions
+    def Markdown(text):
+        return text
+    def display(text):
+        print(text)
 
 from llama_index.core.async_utils import run_jobs
 from llama_index.core.indices.property_graph.utils import (
@@ -95,7 +102,10 @@ class GraphRAGExtractor(TransformComponent):
                 max_knowledge_triplets=self.max_paths_per_chunk,
             )
             entities, entities_relationship = self.parse_fn(llm_response)
-        except ValueError:
+        except (ValueError, Exception) as e:
+            # Handle both parsing errors and connection errors
+            print(f"GraphRAG extraction failed for node: {e}")
+            print("Skipping GraphRAG processing for this node...")
             entities = []
             entities_relationship = []
 

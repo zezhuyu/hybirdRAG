@@ -1,23 +1,24 @@
 from pymilvus import MilvusClient, DataType, Function, FunctionType, AnnSearchRequest, RRFRanker
 from datetime import datetime, timezone
+from typing import List
 import os
 import time
-import globals
 import schedule
 import asyncio
 
 from comp import MLModelClient
 from langchain.schema import Document
-from langchain.text_splitter import SentenceSplitter
-from VectorRAG.text_processing import Formatter
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.embeddings import BaseEmbedding
+from .text_processing import Formatter
 
 schema = MilvusClient.create_schema()
 
 index_params = MilvusClient.prepare_index_params()
 
 bm25_function = Function(
-    name="title_bm25_emb", # Function name
-    input_field_names=["title"], # Name of the VARCHAR field containing raw text data
+    name="content_bm25_emb", # Function name
+    input_field_names=["content"], # Name of the VARCHAR field containing raw text data
     output_field_names=["sparse"], # Name of the SPARSE_FLOAT_VECTOR field reserved to store generated embeddings
     function_type=FunctionType.BM25, # Set to `BM25`
 )
@@ -26,6 +27,10 @@ DIMENSION = 1024
 
 schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True, auto_id=True)
 schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=10000, enable_analyzer=True)
+schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=1000)
+schema.add_field(field_name="page", datatype=DataType.INT64)
+schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=500)
+schema.add_field(field_name="source_path", datatype=DataType.VARCHAR, max_length=1000)
 schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=DIMENSION)
 schema.add_field(field_name="add_at", datatype=DataType.INT64)
 schema.add_field(field_name="chapter", datatype=DataType.INT64)
@@ -53,28 +58,27 @@ index_params.add_index(
     }
 )
 
-index_params.add_index(
-    field_name="text_vector",
-    index_type="IVF_FLAT",
-    metric_type="COSINE",
-    params={
-        "nlist": 128
-    }
-)
+# Removed text_vector index since the field doesn't exist in schema
 
 class VectorRAGPipeline:
-    def __init__(self, milvus: MilvusClient, embedding: Embedding, collection_name: str = "vector_rag"):
+    def __init__(self, milvus: MilvusClient, embedding: BaseEmbedding, collection_name: str = "vector_rag"):
         self.milvus = milvus
         self.index = index_params
         self.embedding = embedding
         self.collection_name = collection_name
         if not self.milvus.has_collection(collection_name=collection_name):
-            self.milvus.create_collection(collection_name="vector_rag", schema=schema, index_params=self.index)
+            print(f"Creating collection {collection_name}...")
+            self.milvus.create_collection(collection_name=collection_name, schema=schema, index_params=self.index)
+        else:
+            print(f"Using existing collection {collection_name}")
 
     def add_document(self, document: List[dict]):
         for doc in document:
             doc["vector"] = self.embedding.embed_sentence(doc["content"])
-            doc['add_at'] = float(doc.get("add_at", time.time()))
+            doc['add_at'] = int(doc.get("add_at", time.time()))
+            # Add default values for required fields
+            doc['chapter'] = doc.get('chapter', 0)
+            doc['section'] = doc.get('section', 0)
         self.milvus.insert(collection_name=self.collection_name, data=document)
 
     def query(self, query: str, limit: int = 10, filters: List[str] = None):

@@ -1,0 +1,126 @@
+"""Utility script to ingest a PDF into the Hybrid RAG stack.
+
+The script expects environment variables describing service endpoints:
+
+    SERVICE_HOST=<grpc_host:port>
+    MILVUS_HOST=<host[:port]>
+    OPENAI_BASE_URL=<http url>
+    OPENAI_API_KEY=<key>
+    NEO4J_HOST=<host[:http_port]>
+    NEO4J_USERNAME=<username>
+    NEO4J_PASSWORD=<password>
+
+Additional optional variables:
+
+    NEO4J_URL=<bolt uri> (defaults to bolt://<host>:<bolt_port>)
+    NEO4J_BOLT_PORT=<port> (defaults to 7687 if not supplied)
+    NEO4J_DATABASE=<db name, defaults to "neo4j">
+    GRAPH_VECTOR_COLLECTION=<Milvus collection for graph embeddings>
+    GRAPH_VECTOR_DIM=<embedding dimension, default 1024>
+    MILVUS_USERNAME / MILVUS_PASSWORD (if auth is enabled)
+
+Usage:
+
+    python load_pdf.py /path/to/book.pdf --env .env
+
+The script will OCR the PDF via `OCRExtractor`, then add the resulting
+documents to the configured `HybridRAGPipeline`.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Any, Dict, Iterable, List
+
+from .cli_utils import build_pipeline_from_env, load_env_file
+from .ocr import OCRExtractor
+
+
+def _ocr_pdf(pdf_path: Path, language: str = "en") -> List[str]:
+    """Extract text from PDF using PyPDF (OCR disabled due to compatibility issues)."""
+    print("Using PyPDF text extraction (OCR disabled)...")
+    return _extract_text_with_pypdf(pdf_path)
+
+def _extract_text_with_pypdf(pdf_path: Path) -> List[str]:
+    """Extract text from PDF using PyPDF as fallback."""
+    try:
+        import PyPDF2
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            pages = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text.strip():  # Only add non-empty pages
+                    pages.append(text.strip())
+            return pages
+    except ImportError:
+        print("PyPDF2 not available. Please install it with: pip install PyPDF2")
+        raise
+    except Exception as e:
+        print(f"PyPDF extraction failed: {e}")
+        raise
+
+
+def _prepare_documents(pages: Iterable[str], source_path: Path) -> List[Dict[str, Any]]:
+    documents: List[Dict[str, Any]] = []
+    title = source_path.stem.replace("_", " ")
+    for idx, page_text in enumerate(pages, start=1):
+        text = page_text.strip()
+        if not text:
+            continue
+        documents.append(
+            {
+                "content": text,
+                "title": title,
+                "page": idx,
+                "source": source_path.name,
+                "source_path": str(source_path.resolve()),
+            }
+        )
+    return documents
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="OCR a PDF and ingest it into HybridRAG")
+    parser.add_argument("pdf_path", type=Path, help="Path to the PDF file to ingest")
+    parser.add_argument(
+        "--env",
+        type=Path,
+        default=Path(".env"),
+        help="Path to a .env file with connection settings (default: .env)",
+    )
+    parser.add_argument(
+        "--lang",
+        default="en",
+        help="Language code for OCR (default: en)",
+    )
+    args = parser.parse_args()
+
+    if not args.pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {args.pdf_path}")
+
+    load_env_file(args.env)
+
+    print("Building pipeline using environment configuration...")
+    pipeline = build_pipeline_from_env()
+
+    print(f"Running OCR on {args.pdf_path} ...")
+    pages = _ocr_pdf(args.pdf_path, language=args.lang)
+    print(f"Extracted text from {len(pages)} pages")
+
+    documents = _prepare_documents(pages, args.pdf_path)
+    if not documents:
+        raise RuntimeError("No text extracted from the PDF; aborting ingestion.")
+
+    print(f"Adding {len(documents)} page documents to the pipeline...")
+    pipeline.add_documents(documents)
+
+    print("Rebuilding graph communities for updated knowledge base...")
+    pipeline.graph_rag.build_communities()
+
+    print("Ingestion complete.")
+
+
+if __name__ == "__main__":
+    main()

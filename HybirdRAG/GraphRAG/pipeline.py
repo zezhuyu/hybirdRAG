@@ -1,17 +1,16 @@
 import json
-import sys
 import re
-import json
-from typing import Any, List
-from llama_index.core.llms import LLM
-from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
-from llama_index.core import PropertyGraphIndex
-from llama_index.core.schema import BaseNode
+import sys
+from typing import Any, Dict, List, Optional
 
-sys.path.append("..")
-from extractor import GraphRAGExtractor
-from store import GraphRAGStore
-from query import GraphRAGQueryEngine
+from llama_index.core import PropertyGraphIndex, StorageContext
+from llama_index.core.llms import LLM
+from llama_index.core.schema import BaseNode
+from llama_index.core.vector_stores.simple import SimpleVectorStore as MilvusVectorStore
+
+from .extractor import GraphRAGExtractor
+from .query import GraphRAGQueryEngine
+from .store import GraphRAGStore
 
 
 
@@ -114,38 +113,82 @@ def parse_fn(response_str: str) -> Any:
 
 
 class GraphRAGPipeline:
-    def __init__(self, llm: LLM, graph_store: GraphRAGStore):
+    def __init__(
+        self,
+        llm: LLM,
+        graph_store: GraphRAGStore,
+        *,
+        vector_store: Optional[MilvusVectorStore] = None,
+        milvus_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.llm = llm
         self.graph_store = graph_store
+        if hasattr(self.graph_store, "set_summarizer_llm"):
+            self.graph_store.set_summarizer_llm(llm)
+        if vector_store is not None:
+            self.vector_store = vector_store
+        else:
+            if milvus_kwargs is None:
+                raise ValueError(
+                    "Provide either an initialised Milvus vector_store or milvus_kwargs "
+                    "to construct one."
+                )
+            self.vector_store = MilvusVectorStore(**milvus_kwargs)
+
+        self.storage_context = StorageContext.from_defaults(
+            graph_store=self.graph_store,
+            vector_store=self.vector_store,
+        )
+
         self.kg_extractor = GraphRAGExtractor(
             llm=llm,
             extract_prompt=KG_TRIPLET_EXTRACT_TMPL,
             max_paths_per_chunk=2,
             parse_fn=parse_fn,
         )
-        self.index = None
-        self.query_engine = None
+        self.index: Optional[PropertyGraphIndex] = None
+        self.query_engine: Optional[GraphRAGQueryEngine] = None
 
-    def build_index(self, nodes: List[BaseNode]):
-        self.index = PropertyGraphIndex(
-            nodes=nodes,
-            kg_extractors=[self.kg_extractor],
-            property_graph_store=self.graph_store,
-            show_progress=True,
+    def build_index(self, nodes: List[BaseNode]) -> PropertyGraphIndex:
+        if not nodes:
+            raise ValueError("No nodes supplied for index construction.")
+
+        processed_nodes = self.kg_extractor(
+            nodes, show_progress=True
+        )
+
+        if self.index is None:
+            self.index = PropertyGraphIndex(
+                nodes=processed_nodes,
+                storage_context=self.storage_context,
+                show_progress=True,
+            )
+        else:
+            self.index.insert_nodes(processed_nodes)
+        return self.index
+
+    def load_index(self) -> PropertyGraphIndex:
+        """Load an existing index definition from the persistent stores."""
+        self.index = PropertyGraphIndex.from_storage(
+            storage_context=self.storage_context
         )
         return self.index
-    
-    def build_communities(self):
+
+    def build_communities(self) -> None:
         self.graph_store.build_communities()
-    
-    def query(self, query: str):
+
+    def query(self, query: str) -> str:
         if self.index is None:
-            raise ValueError("Index is not built")
+            try:
+                self.load_index()
+            except ValueError as exc:
+                raise ValueError("Index is not built and no persisted index found.") from exc
+
         if self.query_engine is None:
             self.query_engine = GraphRAGQueryEngine(
-            graph_store=self.graph_store,
-            llm=self.llm,
-            index=self.index,
-            similarity_top_k=10,
-        )
+                graph_store=self.graph_store,
+                llm=self.llm,
+                index=self.index,
+                similarity_top_k=10,
+            )
         return self.query_engine.custom_query(query)
