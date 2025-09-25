@@ -1,4 +1,3 @@
-
 from pymilvus import MilvusClient, DataType, Function, FunctionType, AnnSearchRequest, RRFRanker
 from datetime import datetime, timezone
 import os
@@ -8,6 +7,9 @@ import schedule
 import asyncio
 
 from comp import MLModelClient
+from langchain.schema import Document
+from langchain.text_splitter import SentenceSplitter
+from VectorRAG.text_processing import Formatter
 
 schema = MilvusClient.create_schema()
 
@@ -72,7 +74,8 @@ class VectorRAGPipeline:
     def add_document(self, document: List[dict]):
         for doc in document:
             doc["vector"] = self.embedding.embed_sentence(doc["content"])
-        self.milvus.add_document(collection_name=self.collection_name, document=document)
+            doc['add_at'] = float(doc.get("add_at", time.time()))
+        self.milvus.insert(collection_name=self.collection_name, data=document)
 
     def query(self, query: str, limit: int = 10, filters: List[str] = None):
         query_embedding = self.embedding.embed_sentence(query)

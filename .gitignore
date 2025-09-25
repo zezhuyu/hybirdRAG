@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .conda/
 comp.egg-info/
+._*
 
 # C extensions
 *.so

@@ -20,8 +20,8 @@ except ImportError:
         raise ImportError("Protobuf files not found. Please run: python -m grpc_tools.protoc --python_out=. --grpc_python_out=. ml_models.proto")
     
 class MLModelClient:
-    def __init__(self, host: str, port: int):
-        self.channel = grpc.insecure_channel(f'{host}:{port}')
+    def __init__(self, host: str):
+        self.channel = grpc.insecure_channel(f'{host}')
         self.stub = pb2_grpc.MLModelServiceStub(self.channel)
 
     def embed_sentence(self, sentence: str) -> List[float]:
