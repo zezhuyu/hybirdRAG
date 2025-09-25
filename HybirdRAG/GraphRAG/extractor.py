@@ -94,7 +94,7 @@ class GraphRAGExtractor(TransformComponent):
         """Extract triples from a node."""
         assert hasattr(node, "text")
 
-        text = node.get_content(metadata_mode="llm")
+        text = node.get_content(metadata_mode="none")
         try:
             llm_response = await self.llm.apredict(
                 self.extract_prompt,

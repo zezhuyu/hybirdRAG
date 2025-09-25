@@ -1,5 +1,12 @@
 """Utility script to ingest a PDF into the Hybrid RAG stack.
 
+This script extracts text from PDFs using PyPDF (default) or OCR (optional),
+then ingests the resulting documents into the HybridRAG pipeline.
+
+Text Extraction Methods:
+- PyPDF (default): Fast, reliable for text-based PDFs
+- OCR (--use-ocr): For scanned PDFs, but may cause compatibility issues on ARM Mac
+
 The script expects environment variables describing service endpoints:
 
     SERVICE_HOST=<grpc_host:port>
@@ -21,9 +28,13 @@ Additional optional variables:
 
 Usage:
 
+    # Use PyPDF (default, recommended)
     python load_pdf.py /path/to/book.pdf --env .env
+    
+    # Use OCR for scanned PDFs (may cause bus errors on ARM Mac)
+    python load_pdf.py /path/to/book.pdf --env .env --use-ocr
 
-The script will OCR the PDF via `OCRExtractor`, then add the resulting
+The script will extract text from the PDF, then add the resulting
 documents to the configured `HybridRAGPipeline`.
 """
 
@@ -37,10 +48,22 @@ from .cli_utils import build_pipeline_from_env, load_env_file
 from .ocr import OCRExtractor
 
 
-def _ocr_pdf(pdf_path: Path, language: str = "en") -> List[str]:
-    """Extract text from PDF using PyPDF (OCR disabled due to compatibility issues)."""
-    print("Using PyPDF text extraction (OCR disabled)...")
-    return _extract_text_with_pypdf(pdf_path)
+def _ocr_pdf(pdf_path: Path, language: str = "en", use_ocr: bool = False) -> List[str]:
+    """Extract text from PDF using OCR or PyPDF fallback."""
+    if use_ocr:
+        try:
+            print("Using OCR text extraction...")
+            ocr_extractor = OCRExtractor(lang=language)
+            return ocr_extractor.pdf_to_text(str(pdf_path))
+        except ImportError as e:
+            print(f"⚠️  OCR not available ({e}), falling back to PyPDF...")
+            return _extract_text_with_pypdf(pdf_path)
+        except Exception as e:
+            print(f"⚠️  OCR failed ({e}), falling back to PyPDF...")
+            return _extract_text_with_pypdf(pdf_path)
+    else:
+        print("Using PyPDF text extraction (OCR disabled)...")
+        return _extract_text_with_pypdf(pdf_path)
 
 def _extract_text_with_pypdf(pdf_path: Path) -> List[str]:
     """Extract text from PDF using PyPDF as fallback."""
@@ -95,6 +118,11 @@ def main() -> None:
         default="en",
         help="Language code for OCR (default: en)",
     )
+    parser.add_argument(
+        "--use-ocr",
+        action="store_true",
+        help="Enable OCR for text extraction (default: PyPDF for better compatibility)",
+    )
     args = parser.parse_args()
 
     if not args.pdf_path.exists():
@@ -105,8 +133,8 @@ def main() -> None:
     print("Building pipeline using environment configuration...")
     pipeline = build_pipeline_from_env()
 
-    print(f"Running OCR on {args.pdf_path} ...")
-    pages = _ocr_pdf(args.pdf_path, language=args.lang)
+    print(f"Running text extraction on {args.pdf_path} ...")
+    pages = _ocr_pdf(args.pdf_path, language=args.lang, use_ocr=args.use_ocr)
     print(f"Extracted text from {len(pages)} pages")
 
     documents = _prepare_documents(pages, args.pdf_path)

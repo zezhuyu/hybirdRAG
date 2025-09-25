@@ -13,14 +13,16 @@ except ImportError:
 from llama_index.core import Settings
 from llama_index.core.llms import ChatMessage, LLM
 try:
-    from llama_index.core.graph_stores.neo4j import Neo4jPropertyGraphStore
+    from .custom_neo4j_store import CustomNeo4jPropertyGraphStore
     NEO4J_AVAILABLE = True
-except ImportError:
-    from llama_index.core.graph_stores.simple import SimpleGraphStore as Neo4jPropertyGraphStore
+    print("✅ Custom Neo4j graph store available")
+except ImportError as e:
+    from llama_index.core.graph_stores.simple import SimpleGraphStore as CustomNeo4jPropertyGraphStore
     NEO4J_AVAILABLE = False
+    print(f"⚠️  Neo4j not available, using SimpleGraphStore: {e}")
 
 
-class GraphRAGStore(Neo4jPropertyGraphStore):
+class GraphRAGStore(CustomNeo4jPropertyGraphStore):
     """Neo4j-backed property graph store with community summarisation support."""
 
     def __init__(
@@ -85,16 +87,32 @@ class GraphRAGStore(Neo4jPropertyGraphStore):
     def _create_nx_graph(self):
         """Converts internal graph representation to NetworkX graph."""
         nx_graph = nx.Graph()
-        triplets = self.get_triplets()
-        for entity1, relation, entity2 in triplets:
-            nx_graph.add_node(entity1.name)
-            nx_graph.add_node(entity2.name)
-            nx_graph.add_edge(
-                relation.source_id,
-                relation.target_id,
-                relationship=relation.label,
-                description=relation.properties["relationship_description"],
-            )
+        try:
+            # Try different method names for getting triplets
+            if hasattr(self, 'get_triplets'):
+                triplets = self.get_triplets()
+            elif hasattr(self, 'get_all_triplets'):
+                triplets = self.get_all_triplets()
+            elif hasattr(self, 'get_relations'):
+                triplets = self.get_relations()
+            else:
+                # Fallback: create empty graph
+                print("⚠️  No triplets method found, creating empty graph")
+                return nx_graph
+            
+            for entity1, relation, entity2 in triplets:
+                nx_graph.add_node(entity1.name)
+                nx_graph.add_node(entity2.name)
+                nx_graph.add_edge(
+                    relation.source_id,
+                    relation.target_id,
+                    relationship=relation.label,
+                    description=relation.properties.get("relationship_description", ""),
+                )
+        except Exception as e:
+            print(f"⚠️  Error creating graph: {e}")
+            return nx_graph
+        
         return nx_graph
 
     def _collect_community_info(self, nx_graph, clusters):

@@ -39,6 +39,9 @@ class ContextualChunker:
         self.stride = stride
         self.padding_context = padding_context
         self.nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])  # lightweight
+        # Add sentencizer to handle sentence boundaries
+        if "sentencizer" not in self.nlp.pipe_names:
+            self.nlp.add_pipe("sentencizer")
     
     def chunk_text(self, text: str, doc_id: str = None) -> List[Dict]:
         """Split one retrieved doc into contextual chunks"""

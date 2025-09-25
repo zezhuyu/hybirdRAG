@@ -8,9 +8,9 @@ from pymilvus import MilvusClient
 from .VectorRAG.pipeline import VectorRAGPipeline
 from .VectorRAG.text_processing import ContextualChunker, LateChunker
 
-from .GraphRAG.convertObj import OpenAILLMWrapper
+from .GraphRAG.convertObj import OpenAILLMWrapper, MLModelEmbeddingWrapper
 from .GraphRAG.pipeline import GraphRAGPipeline
-from .GraphRAG.store import GraphRAGStore
+from .GraphRAG.store import GraphRAGStore, NEO4J_AVAILABLE
 
 from comp import MLModelClient
 from llama_index.core.node_parser import SentenceSplitter
@@ -62,17 +62,44 @@ class HybridRAGPipeline:
             collection_name=vector_collection_name,
         )
 
-        self.openai = OpenAI(api_key=openai_api_key, base_url=os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1/" )
+        # Ensure base_url has /v1 suffix for Ollama compatibility
+        base_url = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1/"
+        if not base_url.endswith('/v1') and not base_url.endswith('/v1/'):
+            base_url = base_url.rstrip('/') + '/v1/'
+        self.openai = OpenAI(api_key=openai_api_key, base_url=base_url)
         self.graph_llm = OpenAILLMWrapper(client=self.openai)
+        
+        # Set the LLM in global settings for all llama-index operations
+        from llama_index.core import Settings
+        Settings.llm = self.graph_llm
 
-        graph_store_settings = dict(neo4j_config)
-        graph_store_settings.setdefault("summarizer_llm", self.graph_llm)
-        self.graph_store = GraphRAGStore(**graph_store_settings)
+        # Configure Neo4j graph store
+        if NEO4J_AVAILABLE:
+            # Parse Neo4j configuration
+            neo4j_url = neo4j_config.get("url", "bolt://localhost:7687")
+            neo4j_username = neo4j_config.get("username", "neo4j")
+            neo4j_password = neo4j_config.get("password", "password")
+            neo4j_database = neo4j_config.get("database", "neo4j")
+            
+            self.graph_store = GraphRAGStore(
+                uri=neo4j_url,
+                username=neo4j_username,
+                password=neo4j_password,
+                database=neo4j_database,
+                summarizer_llm=self.graph_llm
+            )
+        else:
+            # Fallback to simple graph store
+            self.graph_store = GraphRAGStore(summarizer_llm=self.graph_llm)
 
+        # Create embedding wrapper for GraphRAG
+        embedding_wrapper = MLModelEmbeddingWrapper(self.service)
+        
         self.graph_rag = GraphRAGPipeline(
             llm=self.graph_llm,
             graph_store=self.graph_store,
             milvus_kwargs=dict(graph_vector_store_kwargs),
+            embedding_model=embedding_wrapper,
         )
 
         self.splitter = SentenceSplitter(
@@ -89,6 +116,7 @@ class HybridRAGPipeline:
         context_chunk_size: int = 128,
         rerank: bool = True,
         compress: bool = True,
+        limit: int = 10,
     ):
         chat_history = chat_history or []
         rewritten_prompt = rewrite_prompt.format(
@@ -110,14 +138,26 @@ class HybridRAGPipeline:
         except Exception:
             query_text = query
 
-        vector_results = self.vector_rag.query(query_text)
-        graph_answer = self.graph_rag.query(query_text)
+        vector_results = self.vector_rag.query(query_text, limit=limit)
+        
+        # Try to get graph answer, but handle gracefully if it fails
+        try:
+            graph_answer = self.graph_rag.query(query_text)
+        except Exception as e:
+            print(f"⚠️  GraphRAG query failed: {e}")
+            print("Continuing with vector-only search...")
+            graph_answer = ""
 
-        vector_texts = [
-            hit.get("entity", {}).get("content")
-            for hit in vector_results
-            if isinstance(hit, dict)
-        ]
+        # Handle HybridHits objects from Milvus
+        vector_texts = []
+        for hit in vector_results:
+            # HybridHits is iterable and contains Hit objects
+            for hit_item in hit:
+                if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
+                    vector_texts.append(hit_item.entity.content)
+                elif isinstance(hit_item, dict) and 'entity' in hit_item:
+                    vector_texts.append(hit_item['entity'].get('content', ''))
+        
         vector_texts = [text for text in vector_texts if text]
 
         if context_chunk_size > 0 and vector_texts:
@@ -131,7 +171,8 @@ class HybridRAGPipeline:
         results = [graph_answer] + vector_texts
 
         if compress:
-            return self.service.compress_prompt(query_text, results)
+            compressed_result = self.service.compress_prompt(query_text, results)
+            return [compressed_result] if compressed_result else []
         return results
 
     def add_document(self, document: Dict[str, Any]) -> None:

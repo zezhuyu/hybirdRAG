@@ -16,27 +16,24 @@ from .store import GraphRAGStore
 
 
 KG_TRIPLET_EXTRACT_TMPL = """
--Goal-
-Given a text document, identify all entities and their entity types from the text and all relationships among the identified entities.
-Given the text, extract up to {max_knowledge_triplets} entity-relation triplets.
+Extract entities and relationships from the text. Return ONLY valid JSON.
 
--Steps-
-1. Identify all entities. For each identified entity, extract the following information:
-- entity_name: Name of the entity, capitalized
-- entity_type: Type of the entity
-- entity_description: Comprehensive description of the entity's attributes and activities
+Extract up to {max_knowledge_triplets} entities and their relationships.
 
-2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
-For each pair of related entities, extract the following information:
-- source_entity: name of the source entity, as identified in step 1
-- target_entity: name of the target entity, as identified in step 1
-- relation: relationship between source_entity and target_entity
-- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
+For each entity, extract: entity_name, entity_type, entity_description
+For each relationship, extract: source_entity, target_entity, relation, relationship_description
 
-3. Output Formatting:
-- Return the result in valid JSON format with two keys: 'entities' (list of entity objects) and 'relationships' (list of relationship objects).
-- Exclude any text outside the JSON structure (e.g., no explanations or comments).
-- If no entities or relationships are identified, return empty lists: { "entities": [], "relationships": [] }.
+Return ONLY this JSON format (no other text):
+{
+  "entities": [
+    {"entity_name": "Entity Name", "entity_type": "Type", "entity_description": "Description"}
+  ],
+  "relationships": [
+    {"source_entity": "Source", "target_entity": "Target", "relation": "Relation", "relationship_description": "Description"}
+  ]
+}
+
+If none found, return: {"entities": [], "relationships": []}
 
 -An Output Example-
 {
@@ -80,36 +77,135 @@ text: {text}
 output:"""
 
 def parse_fn(response_str: str) -> Any:
-    json_pattern = r"\{.*\}"
-    match = re.search(json_pattern, response_str, re.DOTALL)
+    """Parse the LLM response to extract entities and relationships."""
     entities = []
     relationships = []
-    if not match:
+    
+    # Try to find JSON in the response - look for opening brace
+    json_start = response_str.find('{')
+    if json_start == -1:
+        print(f"❌ No JSON found in response")
+        print(f"Raw response: {response_str[:200]}...")
         return entities, relationships
-    json_str = match.group(0)
+    
+    # Extract everything from the first opening brace
+    json_str = response_str[json_start:]
+    
+    # Try to fix common JSON truncation issues
+    json_str = fix_truncated_json(json_str)
+    
     try:
         data = json.loads(json_str)
+        
+        # Extract entities
         entities = [
             (
-                entity["entity_name"],
-                entity["entity_type"],
-                entity["entity_description"],
+                entity.get("entity_name", ""),
+                entity.get("entity_type", ""),
+                entity.get("entity_description", ""),
             )
             for entity in data.get("entities", [])
         ]
+        
+        # Extract relationships
         relationships = [
             (
-                relation["source_entity"],
-                relation["target_entity"],
-                relation["relation"],
-                relation["relationship_description"],
+                relation.get("source_entity", ""),
+                relation.get("target_entity", ""),
+                relation.get("relation", ""),
+                relation.get("relationship_description", ""),
             )
             for relation in data.get("relationships", [])
         ]
+        
+        print(f"✅ Successfully parsed {len(entities)} entities and {len(relationships)} relationships")
         return entities, relationships
+        
     except json.JSONDecodeError as e:
-        print("Error parsing JSON:", e)
+        print(f"❌ JSON parsing error: {e}")
+        print(f"Raw response: {response_str[:200]}...")
+        
+        # Try to extract partial data from malformed JSON
+        try:
+            partial_entities, partial_relationships = extract_partial_json(response_str)
+            if partial_entities or partial_relationships:
+                print(f"⚠️  Extracted partial data: {len(partial_entities)} entities, {len(partial_relationships)} relationships")
+                return partial_entities, partial_relationships
+        except:
+            pass
+        
         return entities, relationships
+
+
+def fix_truncated_json(json_str: str) -> str:
+    """Attempt to fix common JSON truncation issues."""
+    # If the JSON appears to be truncated (doesn't end with }), try to close it
+    if not json_str.strip().endswith('}'):
+        # Find the last complete object or array
+        brace_count = 0
+        bracket_count = 0
+        in_string = False
+        escape_next = False
+        
+        for i, char in enumerate(json_str):
+            if escape_next:
+                escape_next = False
+                continue
+                
+            if char == '\\':
+                escape_next = True
+                continue
+                
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+                
+            if not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                elif char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+        
+        # Try to close incomplete structures
+        if bracket_count > 0:
+            json_str += ']' * bracket_count
+        if brace_count > 0:
+            json_str += '}' * brace_count
+        elif brace_count < 0:
+            # Remove extra closing braces
+            json_str = json_str.rstrip('}')
+    
+    return json_str
+
+
+def extract_partial_json(response_str: str) -> tuple:
+    """Extract entities and relationships from malformed JSON using regex."""
+    entities = []
+    relationships = []
+    
+    try:
+        # Extract entities using regex patterns
+        entity_pattern = r'"entity_name":\s*"([^"]*)",\s*"entity_type":\s*"([^"]*)",\s*"entity_description":\s*"([^"]*)"'
+        entity_matches = re.findall(entity_pattern, response_str)
+        
+        for match in entity_matches:
+            entities.append((match[0], match[1], match[2]))
+        
+        # Extract relationships using regex patterns
+        rel_pattern = r'"source_entity":\s*"([^"]*)",\s*"target_entity":\s*"([^"]*)",\s*"relation":\s*"([^"]*)",\s*"relationship_description":\s*"([^"]*)"'
+        rel_matches = re.findall(rel_pattern, response_str)
+        
+        for match in rel_matches:
+            relationships.append((match[0], match[1], match[2], match[3]))
+            
+    except Exception as e:
+        print(f"⚠️  Partial extraction failed: {e}")
+    
+    return entities, relationships
 
 
 class GraphRAGPipeline:
@@ -120,8 +216,10 @@ class GraphRAGPipeline:
         *,
         vector_store: Optional[MilvusVectorStore] = None,
         milvus_kwargs: Optional[Dict[str, Any]] = None,
+        embedding_model: Optional[Any] = None,
     ) -> None:
         self.llm = llm
+        self.embedding_model = embedding_model
         self.graph_store = graph_store
         if hasattr(self.graph_store, "set_summarizer_llm"):
             self.graph_store.set_summarizer_llm(llm)
@@ -139,6 +237,12 @@ class GraphRAGPipeline:
             graph_store=self.graph_store,
             vector_store=self.vector_store,
         )
+
+        # Set the LLM and embeddings in global settings for all llama-index operations
+        from llama_index.core import Settings
+        Settings.llm = llm
+        if embedding_model:
+            Settings.embed_model = embedding_model
 
         self.kg_extractor = GraphRAGExtractor(
             llm=llm,
@@ -161,6 +265,7 @@ class GraphRAGPipeline:
             self.index = PropertyGraphIndex(
                 nodes=processed_nodes,
                 storage_context=self.storage_context,
+                property_graph_store=self.graph_store,  # Explicitly pass our custom store
                 show_progress=True,
             )
         else:
@@ -169,8 +274,8 @@ class GraphRAGPipeline:
 
     def load_index(self) -> PropertyGraphIndex:
         """Load an existing index definition from the persistent stores."""
-        self.index = PropertyGraphIndex.from_storage(
-            storage_context=self.storage_context
+        self.index = PropertyGraphIndex.from_existing(
+            property_graph_store=self.graph_store
         )
         return self.index
 
