@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from llama_index.core import PropertyGraphIndex, StorageContext
 from llama_index.core.llms import LLM
 from llama_index.core.schema import BaseNode
+# Use SimpleVectorStore as the base, but we'll connect it to Milvus data
 from llama_index.core.vector_stores.simple import SimpleVectorStore as MilvusVectorStore
 
 from .extractor import GraphRAGExtractor
@@ -217,12 +218,17 @@ class GraphRAGPipeline:
         vector_store: Optional[MilvusVectorStore] = None,
         milvus_kwargs: Optional[Dict[str, Any]] = None,
         embedding_model: Optional[Any] = None,
+        milvus_client: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.embedding_model = embedding_model
         self.graph_store = graph_store
         if hasattr(self.graph_store, "set_summarizer_llm"):
             self.graph_store.set_summarizer_llm(llm)
+        
+        # Store the Milvus client for syncing data
+        self.milvus_client = milvus_client
+        
         if vector_store is not None:
             self.vector_store = vector_store
         else:
@@ -252,6 +258,135 @@ class GraphRAGPipeline:
         )
         self.index: Optional[PropertyGraphIndex] = None
         self.query_engine: Optional[GraphRAGQueryEngine] = None
+        
+        # Try to load existing index first
+        try:
+            self.load_index()
+            print("✅ Loaded existing GraphRAG index")
+        except Exception as e:
+            print(f"⚠️  No existing GraphRAG index found: {e}")
+            self.index = None
+            
+            # If no existing index, try to build one from Milvus data
+            if self.milvus_client is not None:
+                print("🔄 Building new GraphRAG index from Milvus data...")
+                self._build_index_from_milvus()
+
+    def _sync_vector_store_with_milvus(self):
+        """Sync the GraphRAG vector store with data from Milvus collection."""
+        try:
+            from llama_index.core.schema import TextNode
+            
+            # Get collection info
+            collection_name = self.milvus_client.collection_name if hasattr(self.milvus_client, 'collection_name') else 'vector_rag'
+            
+            # Query all documents from Milvus
+            results = self.milvus_client.query(
+                collection_name=collection_name,
+                filter="",  # Get all documents
+                output_fields=["content", "title", "page", "source"],
+                limit=1000  # Reasonable limit
+            )
+            
+            print(f"🔄 Syncing GraphRAG vector store with {len(results)} documents from Milvus...")
+            
+            # Clear existing data
+            self.vector_store._data.embedding_dict.clear()
+            self.vector_store._data.text_id_to_ref_doc_id.clear()
+            self.vector_store._data.metadata_dict.clear()
+            
+            # Add documents to vector store
+            for i, result in enumerate(results):
+                content = result.get('content', '')
+                if content and len(content.strip()) > 50:  # Only substantial content
+                    node = TextNode(
+                        text=content,
+                        metadata={
+                            'title': result.get('title', ''),
+                            'page': result.get('page', ''),
+                            'source': result.get('source', ''),
+                            'milvus_id': result.get('id', i)
+                        }
+                    )
+                    
+                    # Generate embedding and set it on the node
+                    if self.embedding_model and hasattr(self.embedding_model, 'ml_model_client'):
+                        try:
+                            embedding = self.embedding_model.ml_model_client.embed_sentence(content)
+                            # Set the embedding on the node
+                            node.embedding = embedding
+                            
+                            # Add to both vector store and docstore
+                            self.vector_store.add([node])
+                            self.storage_context.docstore.add_documents([node])
+                            
+                            # Ensure proper mapping in vector store
+                            if hasattr(self.vector_store, '_data'):
+                                # Set the text_id_to_ref_doc_id mapping
+                                self.vector_store._data.text_id_to_ref_doc_id[node.node_id] = node.node_id
+                            
+                        except Exception as embed_error:
+                            print(f"⚠️  Failed to generate embedding for document {i}: {embed_error}")
+                            # Skip this document if embedding fails
+                            continue
+                    else:
+                        print(f"⚠️  No embedding model available, skipping document {i}")
+                        continue
+            
+            print(f"✅ Synced {len(results)} documents to GraphRAG vector store")
+            
+        except Exception as e:
+            print(f"⚠️  Failed to sync vector store with Milvus: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _build_index_from_milvus(self):
+        """Build GraphRAG index from Milvus documents."""
+        try:
+            from llama_index.core.schema import TextNode
+            
+            # Get collection info
+            collection_name = self.milvus_client.collection_name if hasattr(self.milvus_client, 'collection_name') else 'vector_rag'
+            
+            # Query documents from Milvus
+            results = self.milvus_client.query(
+                collection_name=collection_name,
+                filter="",  # Get all documents
+                output_fields=["content", "title", "page", "source"],
+                limit=100  # Reasonable limit for GraphRAG
+            )
+            
+            print(f"🔄 Building GraphRAG index from {len(results)} Milvus documents...")
+            
+            # Convert to TextNodes
+            nodes = []
+            for i, result in enumerate(results):
+                content = result.get('content', '')
+                if content and len(content.strip()) > 100:  # Only substantial content
+                    node = TextNode(
+                        text=content,
+                        metadata={
+                            'title': result.get('title', ''),
+                            'page': result.get('page', ''),
+                            'source': result.get('source', ''),
+                            'milvus_id': result.get('id', i)
+                        }
+                    )
+                    nodes.append(node)
+            
+            print(f"🔄 Created {len(nodes)} text nodes, building GraphRAG index...")
+            
+            # Build the index
+            if nodes:
+                self.build_index(nodes)
+                print("✅ GraphRAG index built successfully from Milvus data")
+            else:
+                print("⚠️  No suitable documents found in Milvus")
+                
+        except Exception as e:
+            print(f"⚠️  Failed to build index from Milvus: {e}")
+            import traceback
+            traceback.print_exc()
 
     def build_index(self, nodes: List[BaseNode]) -> PropertyGraphIndex:
         if not nodes:
@@ -274,9 +409,22 @@ class GraphRAGPipeline:
 
     def load_index(self) -> PropertyGraphIndex:
         """Load an existing index definition from the persistent stores."""
-        self.index = PropertyGraphIndex.from_existing(
-            property_graph_store=self.graph_store
-        )
+        # First sync the vector store with Milvus data before loading the index
+        if self.milvus_client is not None:
+            print("🔄 Syncing vector store with Milvus data before loading index...")
+            self._sync_vector_store_with_milvus()
+        
+        # Now try to load the index structure
+        try:
+            self.index = PropertyGraphIndex.from_existing(
+                property_graph_store=self.graph_store,
+                storage_context=self.storage_context  # Use our synced storage context
+            )
+                
+        except Exception as e:
+            print(f"⚠️  Failed to load existing index: {e}")
+            raise
+            
         return self.index
 
     def build_communities(self) -> None:

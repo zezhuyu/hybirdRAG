@@ -66,21 +66,33 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         return [record["obj_name"] for record in result]
     
     def get_rel_map(
-        self, subj_entities: List[str], depth: int = 2, limit: int = 30
-    ) -> Dict[str, List[List[str]]]:
-        """Get relationship map for given subjects."""
-        rel_map = {}
-        for subj in subj_entities:
-            query = """
-            MATCH path = (s {name: $subj})-[:RELATED_TO*1..2]-(o)
-            WHERE s.name = $subj
-            RETURN [node in nodes(path) | node.name] as path_nodes
-            LIMIT $limit
-            """
-            result = self._session.run(query, subj=subj, limit=limit)
-            paths = [record["path_nodes"] for record in result]
-            rel_map[subj] = paths
-        return rel_map
+        self, graph_nodes: List[Any], depth: int = 2, limit: int = 30, ignore_rels: Optional[List[str]] = None
+    ) -> List[Tuple[Any, Any, Any]]:
+        """Get relationship map for given graph nodes."""
+        if ignore_rels is None:
+            ignore_rels = []
+        
+        # Extract node names from graph_nodes (they might be LabelledNode objects)
+        node_names = []
+        for node in graph_nodes:
+            if hasattr(node, 'name'):
+                node_names.append(node.name)
+            elif isinstance(node, str):
+                node_names.append(node)
+            else:
+                # Handle other node types
+                node_names.append(str(node))
+        
+        # Get all triplets that involve the specified nodes
+        all_triplets = self.get_triplets()
+        
+        # Filter triplets that involve our nodes and don't match ignored relationships
+        relevant_triplets = []
+        for entity1, relation, entity2 in all_triplets:
+            if (entity1.name in node_names or entity2.name in node_names) and relation.label not in ignore_rels:
+                relevant_triplets.append((entity1, relation, entity2))
+        
+        return relevant_triplets[:limit]
     
     def upsert_nodes(self, nodes: List[BaseNode]) -> None:
         """Upsert nodes into the Neo4j database."""

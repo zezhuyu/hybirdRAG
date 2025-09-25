@@ -95,11 +95,21 @@ class HybridRAGPipeline:
         # Create embedding wrapper for GraphRAG
         embedding_wrapper = MLModelEmbeddingWrapper(self.service)
         
+        # Use the same Milvus collection for GraphRAG as the main vector store
+        graph_milvus_kwargs = {
+            "host": milvus_host,
+            "collection_name": vector_collection_name,  # Use same collection
+            "dim": 768,  # Same dimension as main vector store
+        }
+        if milvus_client_kwargs:
+            graph_milvus_kwargs.update(milvus_client_kwargs)
+        
         self.graph_rag = GraphRAGPipeline(
             llm=self.graph_llm,
             graph_store=self.graph_store,
-            milvus_kwargs=dict(graph_vector_store_kwargs),
+            milvus_kwargs=graph_milvus_kwargs,
             embedding_model=embedding_wrapper,
+            milvus_client=self.milvus,  # Pass the Milvus client for syncing
         )
 
         self.splitter = SentenceSplitter(
@@ -159,6 +169,11 @@ class HybridRAGPipeline:
                     vector_texts.append(hit_item['entity'].get('content', ''))
         
         vector_texts = [text for text in vector_texts if text]
+        
+        # Debug output
+        print(f"🔍 Debug: Found {len(vector_texts)} vector texts")
+        if vector_texts:
+            print(f"🔍 Debug: First vector text: {vector_texts[0][:100]}...")
 
         if context_chunk_size > 0 and vector_texts:
             self.context_chunker.max_chunk_size = context_chunk_size
@@ -172,7 +187,13 @@ class HybridRAGPipeline:
 
         if compress:
             compressed_result = self.service.compress_prompt(query_text, results)
-            return [compressed_result] if compressed_result else []
+            print(f"🔍 Debug: Compression result: {compressed_result[:100] if compressed_result else 'None'}...")
+            # If compression fails or returns empty, return the original results
+            if compressed_result and compressed_result.strip():
+                return [compressed_result]
+            else:
+                print("⚠️  Compression failed or returned empty, returning original results")
+                return results
         return results
 
     def add_document(self, document: Dict[str, Any]) -> None:
