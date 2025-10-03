@@ -1,3 +1,4 @@
+import os
 from typing import Optional, List, Mapping, Any
 
 from llama_index.core import SimpleDirectoryReader, SummaryIndex, Settings
@@ -37,8 +38,9 @@ class OpenAILLMWrapper(CustomLLM):
     def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
         try:
             # Use the correct OpenAI client method for Ollama
+            model = os.getenv("GRAPH_CREATE_MODEL", "gpt-oss:latest")
             response = self.client.chat.completions.create(
-                model="llama3.1:8b",  # Ollama model name
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=256,
                 temperature=0.1
@@ -55,8 +57,9 @@ class OpenAILLMWrapper(CustomLLM):
     ) -> CompletionResponseGen:
         try:
             # Use streaming for Ollama
+            model = os.getenv("GRAPH_CREATE_MODEL", "gpt-oss:latest")
             response = self.client.chat.completions.create(
-                model="gpt-oss:latest",
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=256,
                 temperature=0.1,
@@ -82,8 +85,9 @@ class OpenAILLMWrapper(CustomLLM):
                 prompt_text = str(prompt)
             
             # Use the correct OpenAI client method for Ollama
+            model = os.getenv("GRAPH_CREATE_MODEL", "gpt-oss:latest")
             response = self.client.chat.completions.create(
-                model="llama3.1:8b",  # Ollama model name
+                model=model,
                 messages=[{"role": "user", "content": prompt_text}],
                 max_tokens=kwargs.get('max_tokens', 256),
                 temperature=kwargs.get('temperature', 0.1)
@@ -134,11 +138,12 @@ class OpenAIEmbeddingsWrapper(BaseEmbedding):
     def __init__(
         self,
         client: OpenAI,
-        model_name: str = "bge-m3:latest ",
+        model_name: str = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._model = client
+        self.model_name = model_name or os.getenv("EMBEDDING_MODEL_NAME", "bge-m3:latest")
 
     def _get_query_embedding(self, query: str) -> List[float]:
         response = self._model.embeddings.create(

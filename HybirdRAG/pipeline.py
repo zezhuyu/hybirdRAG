@@ -28,10 +28,10 @@ given the user chat history and query, rewrite the prompt to be more specific an
 class HybridRAGPipeline:
     def __init__(
         self,
-        service_host: str,
-        milvus_host: str,
-        openai_host: str,
-        openai_api_key: str,
+        service_host: str = None,
+        milvus_host: str = None,
+        openai_host: str = None,
+        openai_api_key: str = None,
         *,
         neo4j_config: Optional[Dict[str, Any]] = None,
         graph_vector_store_kwargs: Optional[Dict[str, Any]] = None,
@@ -40,19 +40,76 @@ class HybridRAGPipeline:
         splitter_chunk_size: int = 1024,
         splitter_overlap: int = 50,
     ) -> None:
+        # Set default values from environment variables
+        service_host = service_host or os.getenv("SERVICE_HOST", "localhost:50051")
+        milvus_host = milvus_host or os.getenv("MILVUS_HOST", "localhost:19530")
+        openai_host = openai_host or os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+        openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "ollama")
+        # Set default Neo4j configuration from environment variables
         if neo4j_config is None:
-            raise ValueError(
-                "neo4j_config is required to initialise the GraphRAG store with Neo4j credentials."
-            )
+            neo4j_config = {
+                "host": os.getenv("NEO4J_HOST", "localhost"),
+                "username": os.getenv("NEO4J_USERNAME", "neo4j"),
+                "password": os.getenv("NEO4J_PASSWORD", "password"),
+                "database": os.getenv("NEO4J_DATABASE", "neo4j"),
+                "bolt_port": int(os.getenv("NEO4J_BOLT_PORT", "7687")),
+                "url": os.getenv("NEO4J_URL", "bolt://localhost:7687"),
+            }
+        
+        # Set default graph vector store configuration from environment variables
         if graph_vector_store_kwargs is None:
-            raise ValueError(
-                "graph_vector_store_kwargs is required so graph embeddings persist in Milvus."
-            )
+            graph_collection = os.getenv("GRAPH_VECTOR_COLLECTION", "graph_rag_embeddings")
+            graph_dim = int(os.getenv("GRAPH_VECTOR_DIM", "1024"))
+            
+            # Parse milvus host for graph store
+            if ":" in milvus_host:
+                milvus_host_parts = milvus_host.split(":", 1)
+                milvus_host_name = milvus_host_parts[0]
+                milvus_port = milvus_host_parts[1]
+            else:
+                milvus_host_name = milvus_host
+                milvus_port = "19530"
+            
+            graph_vector_store_kwargs = {
+                "host": milvus_host_name,
+                "collection_name": graph_collection,
+                "dim": graph_dim,
+                "port": milvus_port,
+                "uri": f"{milvus_host_name}:{milvus_port}",
+            }
+            
+            # Add Milvus credentials if available
+            milvus_user = os.getenv("MILVUS_USERNAME")
+            milvus_password = os.getenv("MILVUS_PASSWORD")
+            if milvus_user:
+                graph_vector_store_kwargs["user"] = milvus_user
+            if milvus_password:
+                graph_vector_store_kwargs["password"] = milvus_password
+        
+        # Set default Milvus client configuration from environment variables
+        if milvus_client_kwargs is None:
+            # Parse milvus host for client
+            if ":" in milvus_host:
+                milvus_host_parts = milvus_host.split(":", 1)
+                milvus_host_name = milvus_host_parts[0]
+                milvus_port = milvus_host_parts[1]
+            else:
+                milvus_host_name = milvus_host
+                milvus_port = "19530"
+            
+            milvus_uri = f"http://{milvus_host_name}:{milvus_port}"
+            milvus_client_kwargs = {"uri": milvus_uri}
+            
+            # Add Milvus credentials if available
+            milvus_user = os.getenv("MILVUS_USERNAME")
+            milvus_password = os.getenv("MILVUS_PASSWORD")
+            if milvus_user:
+                milvus_client_kwargs["user"] = milvus_user
+            if milvus_password:
+                milvus_client_kwargs["password"] = milvus_password
         self.service = MLModelClient(host=service_host)
-        milvus_kwargs: Dict[str, Any] = {"host": milvus_host}
-        if milvus_client_kwargs:
-            milvus_kwargs.update(milvus_client_kwargs)
-        self.milvus = MilvusClient(**milvus_kwargs)
+        # Use the configured milvus_client_kwargs directly
+        self.milvus = MilvusClient(**milvus_client_kwargs)
 
         self.vector_rag = VectorRAGPipeline(
             milvus=self.milvus,
@@ -128,8 +185,9 @@ class HybridRAGPipeline:
             chat_history="\n".join(chat_history), query=query
         )
         try:
+            model = os.getenv("PROMPT_REWRITE_MODEL", "qwen3:0.6b")
             rewritten = self.openai.chat.completions.create(
-                model="qwen3:0.6b",
+                model=model,
                 messages=[
                     {"role": "system", "content": rewritten_prompt},
                     {"role": "user", "content": query},

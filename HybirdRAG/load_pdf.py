@@ -44,7 +44,7 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from .cli_utils import build_pipeline_from_env, load_env_file
+from .pipeline import HybridRAGPipeline
 from .ocr import OCRExtractor
 
 
@@ -52,7 +52,6 @@ def _ocr_pdf(pdf_path: Path, language: str = "en", use_ocr: bool = False) -> Lis
     """Extract text from PDF using OCR or PyPDF fallback."""
     if use_ocr:
         try:
-            print("Using OCR text extraction...")
             ocr_extractor = OCRExtractor(lang=language)
             return ocr_extractor.pdf_to_text(str(pdf_path))
         except ImportError as e:
@@ -62,7 +61,6 @@ def _ocr_pdf(pdf_path: Path, language: str = "en", use_ocr: bool = False) -> Lis
             print(f"⚠️  OCR failed ({e}), falling back to PyPDF...")
             return _extract_text_with_pypdf(pdf_path)
     else:
-        print("Using PyPDF text extraction (OCR disabled)...")
         return _extract_text_with_pypdf(pdf_path)
 
 def _extract_text_with_pypdf(pdf_path: Path) -> List[str]:
@@ -128,10 +126,8 @@ def main() -> None:
     if not args.pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {args.pdf_path}")
 
-    load_env_file(args.env)
-
     print("Building pipeline using environment configuration...")
-    pipeline = build_pipeline_from_env()
+    pipeline = HybridRAGPipeline()
 
     print(f"Running text extraction on {args.pdf_path} ...")
     pages = _ocr_pdf(args.pdf_path, language=args.lang, use_ocr=args.use_ocr)
