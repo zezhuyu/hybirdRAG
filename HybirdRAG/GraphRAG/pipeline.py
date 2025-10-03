@@ -85,8 +85,6 @@ def parse_fn(response_str: str) -> Any:
     # Try to find JSON in the response - look for opening brace
     json_start = response_str.find('{')
     if json_start == -1:
-        print(f"❌ No JSON found in response")
-        print(f"Raw response: {response_str[:200]}...")
         return entities, relationships
     
     # Extract everything from the first opening brace
@@ -94,6 +92,16 @@ def parse_fn(response_str: str) -> Any:
     
     # Try to fix common JSON truncation issues
     json_str = fix_truncated_json(json_str)
+    
+    # Clean common JSON formatting issues from LLM responses
+    # Fix double braces at start/end
+    if json_str.startswith('{{') and json_str.endswith('}}'):
+        json_str = json_str[1:-1]  # Remove outer braces
+    
+    # Fix double braces within arrays (common LLM issue)
+    import re
+    json_str = re.sub(r'\{\{', '{', json_str)  # Replace {{ with {
+    json_str = re.sub(r'\}\}', '}', json_str)  # Replace }} with }
     
     try:
         data = json.loads(json_str)
@@ -119,7 +127,7 @@ def parse_fn(response_str: str) -> Any:
             for relation in data.get("relationships", [])
         ]
         
-        print(f"✅ Successfully parsed {len(entities)} entities and {len(relationships)} relationships")
+        # Suppress parsing success messages to keep progress bar clean
         return entities, relationships
         
     except json.JSONDecodeError as e:
@@ -135,6 +143,8 @@ def parse_fn(response_str: str) -> Any:
         except:
             pass
         
+        # If partial extraction also fails, return empty results (no retry to avoid infinite loops)
+        print("⚠️  No valid data could be extracted from malformed JSON")
         return entities, relationships
 
 
@@ -276,42 +286,49 @@ class GraphRAGPipeline:
         # Try to load existing index first
         try:
             self.load_index()
-            print("✅ Loaded existing GraphRAG index")
         except Exception as e:
             print(f"⚠️  No existing GraphRAG index found: {e}")
             self.index = None
             
             # If no existing index, try to build one from Milvus data
             if self.milvus_client is not None:
-                print("🔄 Building new GraphRAG index from Milvus data...")
                 self._build_index_from_milvus()
 
     def _sync_vector_store_with_milvus(self):
         """Sync the GraphRAG vector store with data from Milvus collection."""
         try:
             from llama_index.core.schema import TextNode
+            import time
+            
+            start_time = time.time()
             
             # Get collection info
             collection_name = self.milvus_client.collection_name if hasattr(self.milvus_client, 'collection_name') else 'vector_rag'
             
-            # Query all documents from Milvus
+            # 🚀 Optimized query with progress indicator
             results = self.milvus_client.query(
                 collection_name=collection_name,
                 filter="",  # Get all documents
-                output_fields=["content", "title", "page", "source"],
+                output_fields=["content", "title", "page", "source", "vector"],  # 🚀 Include existing embeddings
                 limit=1000  # Reasonable limit
             )
             
-            print(f"🔄 Syncing GraphRAG vector store with {len(results)} documents from Milvus...")
+            query_time = time.time() - start_time
             
             # Clear existing data
             self.vector_store._data.embedding_dict.clear()
             self.vector_store._data.text_id_to_ref_doc_id.clear()
             self.vector_store._data.metadata_dict.clear()
             
-            # Add documents to vector store
+            # Prepare nodes for batch processing
+            nodes_to_add = []
+            embeddings_needed = []
+            contents_for_embedding = []
+            
             for i, result in enumerate(results):
                 content = result.get('content', '')
+                existing_vector = result.get('vector')  # 🚀 Check for existing embedding
+                
                 if content and len(content.strip()) > 50:  # Only substantial content
                     node = TextNode(
                         text=content,
@@ -323,31 +340,56 @@ class GraphRAGPipeline:
                         }
                     )
                     
-                    # Generate embedding and set it on the node
-                    if self.embedding_model and hasattr(self.embedding_model, 'ml_model_client'):
-                        try:
-                            embedding = self.embedding_model.ml_model_client.embed_sentence(content)
-                            # Set the embedding on the node
-                            node.embedding = embedding
-                            
-                            # Add to both vector store and docstore
-                            self.vector_store.add([node])
-                            self.storage_context.docstore.add_documents([node])
-                            
-                            # Ensure proper mapping in vector store
-                            if hasattr(self.vector_store, '_data'):
-                                # Set the text_id_to_ref_doc_id mapping
-                                self.vector_store._data.text_id_to_ref_doc_id[node.node_id] = node.node_id
-                            
-                        except Exception as embed_error:
-                            print(f"⚠️  Failed to generate embedding for document {i}: {embed_error}")
-                            # Skip this document if embedding fails
-                            continue
+                    if existing_vector and len(existing_vector) > 0:
+                        # 🚀 Use existing embedding - no network call needed!
+                        node.embedding = existing_vector
+                        nodes_to_add.append(node)
                     else:
-                        print(f"⚠️  No embedding model available, skipping document {i}")
-                        continue
+                        # Need to generate embedding
+                        embeddings_needed.append((i, node))
+                        contents_for_embedding.append(content)
             
-            print(f"✅ Synced {len(results)} documents to GraphRAG vector store")
+            # Generate embeddings for documents that don't have them
+            if contents_for_embedding:
+                
+                if self.embedding_model and hasattr(self.embedding_model, 'ml_model_client'):
+                    try:
+                        # Check if batch embedding is available
+                        if hasattr(self.embedding_model.ml_model_client, 'embed_sentences'):
+                            embeddings = self.embedding_model.ml_model_client.embed_sentences(contents_for_embedding)
+                        else:
+                            embeddings = []
+                            for j, content in enumerate(contents_for_embedding):
+                                embedding = self.embedding_model.ml_model_client.embed_sentence(content)
+                                embeddings.append(embedding)
+                        
+                        # Add embeddings to nodes
+                        for (i, node), embedding in zip(embeddings_needed, embeddings):
+                            node.embedding = embedding
+                            nodes_to_add.append(node)
+                        
+                            
+                    except Exception as embed_error:
+                        print(f"⚠️  Failed to generate embeddings: {embed_error}")
+                        # Continue without these documents
+                else:
+                    print(f"⚠️  No embedding model available, skipping {len(contents_for_embedding)} documents")
+            
+            reused_count = len(nodes_to_add) - len(contents_for_embedding)
+            
+            # 🚀 Batch insert all nodes at once
+            if nodes_to_add:
+                self.vector_store.add(nodes_to_add)
+                self.storage_context.docstore.add_documents(nodes_to_add)
+                
+                # Ensure proper mapping in vector store
+                if hasattr(self.vector_store, '_data'):
+                    for node in nodes_to_add:
+                        self.vector_store._data.text_id_to_ref_doc_id[node.node_id] = node.node_id
+                
+                total_time = time.time() - start_time
+            else:
+                print("⚠️  No nodes to add")
             
         except Exception as e:
             print(f"⚠️  Failed to sync vector store with Milvus: {e}")
@@ -357,8 +399,6 @@ class GraphRAGPipeline:
     def _build_index_from_milvus(self):
         """Build GraphRAG index from Milvus documents."""
         try:
-            # First sync the vector store with Milvus data
-            print("🔄 Syncing vector store with Milvus data before building index...")
             self._sync_vector_store_with_milvus()
             
             from llama_index.core.schema import TextNode
@@ -374,7 +414,6 @@ class GraphRAGPipeline:
                 limit=100  # Reasonable limit for GraphRAG
             )
             
-            print(f"🔄 Building GraphRAG index from {len(results)} Milvus documents...")
             
             # Convert to TextNodes
             nodes = []
@@ -392,12 +431,9 @@ class GraphRAGPipeline:
                     )
                     nodes.append(node)
             
-            print(f"🔄 Created {len(nodes)} text nodes, building GraphRAG index...")
-            
             # Build the index
             if nodes:
                 self.build_index(nodes)
-                print("✅ GraphRAG index built successfully from Milvus data")
             else:
                 print("⚠️  No suitable documents found in Milvus")
                 
@@ -411,7 +447,7 @@ class GraphRAGPipeline:
             raise ValueError("No nodes supplied for index construction.")
 
         processed_nodes = self.kg_extractor(
-            nodes, show_progress=True
+            nodes, show_progress=False
         )
 
         if self.index is None:
@@ -419,7 +455,7 @@ class GraphRAGPipeline:
                 nodes=processed_nodes,
                 storage_context=self.storage_context,
                 property_graph_store=self.graph_store,  # Explicitly pass our custom store
-                show_progress=True,
+                show_progress=False,
             )
         else:
             self.index.insert_nodes(processed_nodes)
@@ -429,7 +465,6 @@ class GraphRAGPipeline:
         """Load an existing index definition from the persistent stores."""
         # First sync the vector store with Milvus data before loading the index
         if self.milvus_client is not None:
-            print("🔄 Syncing vector store with Milvus data before loading index...")
             self._sync_vector_store_with_milvus()
         
         # Now try to load the index structure
@@ -463,6 +498,134 @@ class GraphRAGPipeline:
                 similarity_top_k=10,
             )
         return self.query_engine.custom_query(query)
+
+    def fast_query(self, query: str, max_communities: int = 5) -> Dict[str, Any]:
+        """
+        🚀 Ultra-fast query that returns raw data in 1-2 seconds.
+        Skips expensive LLM processing during retrieval - perfect for downstream LLM processing.
+        """
+        import time
+        from typing import Dict, Any, List
+        
+        start_time = time.time()
+        
+        if self.index is None:
+            try:
+                self.load_index()
+            except ValueError as exc:
+                raise ValueError("Index is not built and no persisted index found.") from exc
+        
+        try:
+            # 🚀 Step 1: Fast entity extraction (simplified)
+            entities = self._fast_extract_entities(query)
+            step1_time = time.time() - start_time
+            
+            # 🚀 Step 2: Lightning-fast community lookup
+            community_data = self._fast_get_communities(entities, max_communities)
+            step2_time = time.time() - start_time
+            
+            # 🚀 Step 3: Return raw data (no LLM calls!)
+            result = {
+                "query": query,
+                "entities": entities[:10],
+                "communities": community_data,
+                "total_retrieval_time": time.time() - start_time,
+                "performance_breakdown": {
+                    "entity_extraction": step1_time,
+                    "community_lookup": step2_time - step1_time,
+                    "data_formatting": time.time() - start_time - step2_time
+                },
+                "optimization_note": "Raw data returned - no LLM processing during retrieval"
+            }
+            
+            
+            return result
+            
+        except Exception as e:
+            print(f"⚠️  Fast query failed: {e}")
+            return {
+                "query": query,
+                "entities": [],
+                "communities": [],
+                "total_retrieval_time": time.time() - start_time,
+                "error": str(e)
+            }
+
+    def _fast_extract_entities(self, query: str) -> List[str]:
+        """Fast entity extraction optimized for speed."""
+        import re
+        
+        try:
+            # Use minimal similarity search for speed
+            nodes_retrieved = self.index.as_retriever(similarity_top_k=5).retrieve(query)
+            
+            entities = set()
+            
+            # Extract entities from top nodes only
+            for node in nodes_retrieved[:3]:  # Limit for speed
+                # Structured extraction (original method)
+                matches = re.findall(
+                    r"^(\w+(?:\s+\w+)*)\s*->\s*([a-zA-Z\s]+?)\s*->\s*(\w+(?:\s+\w+)*)$",
+                    node.text, re.MULTILINE | re.IGNORECASE
+                )
+                
+                for match in matches:
+                    entities.add(match[0].strip())
+                    entities.add(match[2].strip())
+            
+            # Fallback: extract from query itself
+            query_entities = re.findall(r'\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)*)\b', query)
+            entities.update(query_entities)
+            
+            # Filter and limit
+            entity_list = [e for e in entities if len(e) > 2][:15]
+            return entity_list
+            
+        except Exception as e:
+            # Emergency fallback
+            return re.findall(r'\b([A-Z][a-z]+)\b', query)[:5]
+
+    def _fast_get_communities(self, entities: List[str], max_communities: int = 5) -> List[Dict[str, Any]]:
+        """Lightning-fast community retrieval."""
+        try:
+            # Get cached community summaries
+            all_communities = self.graph_store.get_community_summaries()
+            entity_info = self.graph_store.entity_info
+            
+            community_scores = {}
+            
+            # Score communities based on entity matches
+            for entity in entities:
+                if entity in entity_info:
+                    for comm_id in entity_info[entity]:
+                        if comm_id in all_communities:
+                            if comm_id not in community_scores:
+                                community_scores[comm_id] = {
+                                    "score": 0,
+                                    "matched_entities": []
+                                }
+                            community_scores[comm_id]["score"] += 1
+                            community_scores[comm_id]["matched_entities"].append(entity)
+            
+            # Create result list with summaries
+            results = []
+            for comm_id, data in community_scores.items():
+                summary = all_communities[comm_id]
+                results.append({
+                    "community_id": comm_id,
+                    "summary": summary,
+                    "score": data["score"],
+                    "matched_entities": data["matched_entities"],
+                    "summary_preview": summary[:200] + "..." if len(summary) > 200 else summary
+                })
+            
+            # Sort by score and limit
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:max_communities]
+            
+        except Exception as e:
+            print(f"⚠️  Community retrieval failed: {e}")
+            return []
     
     def _patch_vector_context_retriever(self):
         """Patch the VectorContextRetriever to fix the supports_vector_queries bug."""
@@ -614,7 +777,6 @@ class GraphRAGPipeline:
             # Apply the patches
             VectorContextRetriever.retrieve_from_graph = patched_retrieve_from_graph
             VectorContextRetriever.aretrieve_from_graph = patched_aretrieve_from_graph
-            print("✅ Patched VectorContextRetriever (both sync and async) to fix supports_vector_queries bug")
             
         except Exception as e:
             print(f"⚠️  Failed to patch VectorContextRetriever: {e}")

@@ -28,6 +28,23 @@ class MLModelClient:
         response = self.stub.EmbedSentence(pb2.EmbedSentenceRequest(sentence=sentence))
         return response.embedding
 
+    def embed_sentences(self, sentences: List[str]) -> List[List[float]]:
+        """
+        🚀 Batch embedding generation - optimized for multiple sentences.
+        Falls back to individual calls if batch method fails.
+        """
+        try:
+            # Try batch method first
+            return self.embed_batch(sentences)
+        except Exception as e:
+            print(f"⚠️  Batch embedding failed, using individual calls: {e}")
+            # Fallback to individual calls
+            embeddings = []
+            for sentence in sentences:
+                embedding = self.embed_sentence(sentence)
+                embeddings.append(embedding)
+            return embeddings
+
     def embed_batch(self, sentences: List[str]) -> List[List[float]]:
         response = self.stub.EmbedBatch(pb2.EmbedBatchRequest(sentences=sentences))
         return [r.values for r in response.embeddings]

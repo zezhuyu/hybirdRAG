@@ -48,9 +48,7 @@ class HybridRAGPipeline:
             raise ValueError(
                 "graph_vector_store_kwargs is required so graph embeddings persist in Milvus."
             )
-
         self.service = MLModelClient(host=service_host)
-
         milvus_kwargs: Dict[str, Any] = {"host": milvus_host}
         if milvus_client_kwargs:
             milvus_kwargs.update(milvus_client_kwargs)
@@ -62,7 +60,6 @@ class HybridRAGPipeline:
             collection_name=vector_collection_name,
         )
 
-        # Ensure base_url has /v1 suffix for Ollama compatibility
         base_url = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1/"
         if not base_url.endswith('/v1') and not base_url.endswith('/v1/'):
             base_url = base_url.rstrip('/') + '/v1/'
@@ -73,7 +70,6 @@ class HybridRAGPipeline:
         from llama_index.core import Settings
         Settings.llm = self.graph_llm
 
-        # Configure Neo4j graph store
         if NEO4J_AVAILABLE:
             # Parse Neo4j configuration
             neo4j_url = neo4j_config.get("url", "bolt://localhost:7687")
@@ -92,7 +88,6 @@ class HybridRAGPipeline:
             # Fallback to simple graph store
             self.graph_store = GraphRAGStore(summarizer_llm=self.graph_llm)
 
-        # Create embedding wrapper for GraphRAG
         embedding_wrapper = MLModelEmbeddingWrapper(self.service)
         
         # Use the same Milvus collection for GraphRAG as the main vector store
@@ -173,10 +168,6 @@ class HybridRAGPipeline:
         
         vector_texts = [text for text in vector_texts if text]
         
-        # Debug output
-        print(f"🔍 Debug: Found {len(vector_texts)} vector texts")
-        if vector_texts:
-            print(f"🔍 Debug: First vector text: {vector_texts[0][:100]}...")
 
         if context_chunk_size > 0 and vector_texts:
             self.context_chunker.max_chunk_size = context_chunk_size
@@ -186,16 +177,21 @@ class HybridRAGPipeline:
         if rerank and vector_texts:
             vector_texts = self.service.rerank_documents(vector_texts, query_text)
 
-        # Only include graph_answer if it's not None
-        results = vector_texts
-        if graph_answer is not None:
-            results = [graph_answer] + vector_texts
+        # Prioritize GraphRAG answer if available
+        if graph_answer is not None and graph_answer.strip() and "No relevant information found" not in graph_answer:
+            # GraphRAG found a good answer - use it as primary result
+            results = [graph_answer]
+            # Add top vector results as supplementary information
+            if vector_texts:
+                results.extend(vector_texts[:2])  # Top 2 vector results as supplement
+        else:
+            # Fallback to vector results only
+            results = vector_texts
 
         if compress:
             # Only compress the vector texts, not the GraphRAG answer (which can be garbled)
             texts_to_compress = vector_texts if vector_texts else results
             compressed_result = self.service.compress_prompt(query_text, texts_to_compress)
-            print(f"🔍 Debug: Compression result: {compressed_result[:100] if compressed_result else 'None'}...")
             # If compression fails or returns empty, return the original results
             if compressed_result and compressed_result.strip():
                 # Return compressed summary + GraphRAG answer (if available) + top vector results
@@ -205,9 +201,91 @@ class HybridRAGPipeline:
                 final_results.extend(vector_texts[:2])  # Top 2 vector results
                 return final_results
             else:
-                print("⚠️  Compression failed or returned empty, returning original results")
                 return results
         return results
+
+    # def fast_query(
+    #     self, 
+    #     query: str, 
+    #     limit: int = 5,
+    #     use_vector: bool = True,
+    #     use_graph: bool = True,
+    #     max_communities: int = 3
+    # ) -> Dict[str, Any]:
+    #     """
+    #     🚀 Ultra-fast hybrid query optimized for 1-2 second retrieval.
+    #     Returns raw data perfect for downstream LLM processing.
+    #     Skips expensive LLM processing during retrieval.
+    #     """
+    #     import time
+    #     from typing import Dict, Any
+        
+    #     start_time = time.time()
+        
+    #     result = {
+    #         "query": query,
+    #         "vector_results": [],
+    #         "graph_results": [],
+    #         "total_retrieval_time": 0,
+    #         "performance_breakdown": {},
+    #         "optimization_note": "Fast retrieval - raw data for LLM processing"
+    #     }
+        
+    #     # 🚀 Vector RAG (skip expensive query rewriting)
+    #     vector_time = 0
+    #     if use_vector:
+    #         vector_start = time.time()
+    #         try:
+    #             # Use original query directly for speed
+    #             vector_results = self.vector_rag.query(query, limit=min(limit, 8))
+                
+    #             # Process vector results efficiently
+    #             vector_texts = []
+    #             for hit in vector_results:
+    #                 for hit_item in hit:
+    #                     if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
+    #                         vector_texts.append({
+    #                             "content": hit_item.entity.content,
+    #                             "score": getattr(hit_item, 'score', 0.0),
+    #                             "source": getattr(hit_item.entity, 'source', 'unknown')
+    #                         })
+    #                     elif isinstance(hit_item, dict) and 'content' in hit_item:
+    #                         vector_texts.append({
+    #                             "content": hit_item['content'],
+    #                             "score": hit_item.get('score', 0.0),
+    #                             "source": hit_item.get('source', 'unknown')
+    #                         })
+                
+    #             result["vector_results"] = vector_texts[:limit]
+    #             vector_time = time.time() - vector_start
+                
+    #         except Exception as e:
+    #             print(f"⚠️  Vector RAG failed: {e}")
+    #             result["vector_results"] = []
+        
+    #     # 🚀 Graph RAG (fast mode - no LLM processing)
+    #     graph_time = 0
+    #     if use_graph and self.graph_rag:
+    #         graph_start = time.time()
+    #         try:
+    #             graph_data = self.graph_rag.fast_query(query, max_communities=max_communities)
+    #             result["graph_results"] = graph_data.get("communities", [])
+    #             result["graph_entities"] = graph_data.get("entities", [])
+                
+    #             graph_time = time.time() - graph_start
+                
+    #         except Exception as e:
+    #             print(f"⚠️  Graph RAG failed: {e}")
+    #             result["graph_results"] = []
+        
+    #     result["total_retrieval_time"] = time.time() - start_time
+    #     result["performance_breakdown"] = {
+    #         "vector_time": vector_time,
+    #         "graph_time": graph_time,
+    #         "total_time": result["total_retrieval_time"]
+    #     }
+        
+    #     return result
 
     def add_document(self, document: Dict[str, Any]) -> None:
         metadata = {k: v for k, v in document.items() if k != "content"}
@@ -225,7 +303,8 @@ class HybridRAGPipeline:
         graph_nodes = self._build_graph_nodes(text, metadata)
         if graph_nodes:
             self.graph_rag.build_index(graph_nodes)
-            self.graph_rag.build_communities()
+            # 🚀 For single documents, use smart rebuilding to avoid unnecessary work
+            self._rebuild_communities_if_needed()
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         all_vector_docs: List[Dict[str, Any]] = []
@@ -248,6 +327,7 @@ class HybridRAGPipeline:
 
         if all_nodes:
             self.graph_rag.build_index(all_nodes)
+            # 🚀 Generate communities immediately during document loading (not query time!)
             self.graph_rag.build_communities()
 
     def _build_graph_nodes(
@@ -255,6 +335,23 @@ class HybridRAGPipeline:
     ) -> List[TextNode]:
         chunks = self.splitter.split_text(text)
         return [TextNode(text=chunk, metadata=metadata) for chunk in chunks if chunk]
+
+    def _rebuild_communities_if_needed(self):
+        """Only rebuild communities if the graph has changed significantly."""
+        try:
+            if hasattr(self.graph_rag.graph_store, '_should_rebuild_communities'):
+                if self.graph_rag.graph_store._should_rebuild_communities():
+                    # Rebuilding communities silently
+                    self.graph_rag.graph_store.invalidate_communities()
+                    self.graph_rag.build_communities()
+            else:
+                # Fallback to always rebuild if change detection not available
+                print("⚠️  Change detection not available - rebuilding communities")
+                self.graph_rag.build_communities()
+        except Exception as e:
+            print(f"⚠️  Error in community rebuild check: {e}")
+            # Fallback to rebuild
+            self.graph_rag.build_communities()
 
 
 def main():
@@ -279,7 +376,6 @@ def main():
         pipeline = build_pipeline_from_env()
         
         if args.query:
-            print(f"Processing query: {args.query}")
             results = pipeline.query(args.query, limit=args.limit)
             print(f"Found {len(results)} results")
             for i, result in enumerate(results):

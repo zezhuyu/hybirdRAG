@@ -67,10 +67,8 @@ class VectorRAGPipeline:
         self.embedding = embedding
         self.collection_name = collection_name
         if not self.milvus.has_collection(collection_name=collection_name):
-            print(f"Creating collection {collection_name}...")
             self.milvus.create_collection(collection_name=collection_name, schema=schema, index_params=self.index)
-        else:
-            print(f"Using existing collection {collection_name}")
+
 
     def add_document(self, document: List[dict]):
         for doc in document:
