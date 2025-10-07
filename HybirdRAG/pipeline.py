@@ -174,32 +174,35 @@ class HybridRAGPipeline:
     def query(
         self,
         query: str,
+        rewrite: bool = True,
         chat_history: Optional[List[str]] = None,
         context_chunk_size: int = 128,
         rerank: bool = True,
         compress: bool = True,
         limit: int = 10,
     ):
-        chat_history = chat_history or []
-        rewritten_prompt = rewrite_prompt.format(
-            chat_history="\n".join(chat_history), query=query
-        )
-        try:
-            model = os.getenv("PROMPT_REWRITE_MODEL", "qwen3:0.6b")
-            rewritten = self.openai.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": rewritten_prompt},
-                    {"role": "user", "content": query},
-                ],
+        query_text = query
+        if rewrite:
+            chat_history = chat_history or []
+            rewritten_prompt = rewrite_prompt.format(
+                chat_history="\n".join(chat_history), query=query
             )
-            query_text = (
-                rewritten.choices[0].message.content
-                if rewritten and rewritten.choices
-                else query
-            )
-        except Exception:
-            query_text = query
+            try:
+                model = os.getenv("PROMPT_REWRITE_MODEL", "qwen3:0.6b")
+                rewritten = self.openai.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": rewritten_prompt},
+                        {"role": "user", "content": query},
+                    ],
+                )
+                query_text = (
+                    rewritten.choices[0].message.content
+                    if rewritten and rewritten.choices
+                    else query
+                )
+            except Exception:
+                query_text = query
 
         vector_results = self.vector_rag.query(query_text, limit=limit)
         
@@ -236,28 +239,27 @@ class HybridRAGPipeline:
             vector_texts = self.service.rerank_documents(vector_texts, query_text)
 
         # Prioritize GraphRAG answer if available
+        results = []
         if graph_answer is not None and graph_answer.strip() and "No relevant information found" not in graph_answer:
             # GraphRAG found a good answer - use it as primary result
             results = [graph_answer]
             # Add top vector results as supplementary information
             if vector_texts:
-                results.extend(vector_texts[:2])  # Top 2 vector results as supplement
+                results.extend(vector_texts[:limit-1])  # Top 2 vector results as supplement
         else:
             # Fallback to vector results only
             results = vector_texts
 
         if compress:
-            # Only compress the vector texts, not the GraphRAG answer (which can be garbled)
-            texts_to_compress = vector_texts if vector_texts else results
-            compressed_result = self.service.compress_prompt(query_text, texts_to_compress)
+            compressed_result = self.service.compress_prompt(query_text, results)
             # If compression fails or returns empty, return the original results
             if compressed_result and compressed_result.strip():
                 # Return compressed summary + GraphRAG answer (if available) + top vector results
-                final_results = [compressed_result]
-                if graph_answer is not None:
-                    final_results.append(graph_answer)
-                final_results.extend(vector_texts[:2])  # Top 2 vector results
-                return final_results
+                # final_results = [compressed_result]
+                # if graph_answer is not None:
+                #     final_results.append(graph_answer)
+                # final_results.extend(vector_texts[:limit-1])  # Top 2 vector results
+                return [compressed_result]
             else:
                 return results
         return results
