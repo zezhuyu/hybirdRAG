@@ -1,6 +1,8 @@
 from typing import Any, Dict, List, Optional
 import sys
 import os
+import ast
+import re
 
 from openai import OpenAI
 from pymilvus import MilvusClient
@@ -24,6 +26,7 @@ given the user chat history and query, rewrite the prompt to be more specific an
 {chat_history}
 # Query:
 """
+
 
 class HybridRAGPipeline:
     def __init__(
@@ -171,15 +174,132 @@ class HybridRAGPipeline:
         self.late_chunker = LateChunker()
         self.context_chunker = ContextualChunker()
 
+    def _broaden_query_with_retry(self, query_text: str, retry_limit: int = 3) -> Optional[List[str]]:
+        """Broaden query with retry mechanism for better reliability."""
+        broaden_prompt = """Create 3-5 related search queries for: "{query}"
+
+Examples:
+"What happened to the main character?" → ["How did the main character develop?", "What challenges did the main character face?", "What was the main character's background?", "How did the main character change?"]
+
+"Tell me about the setting" → ["What is the environment like?", "Where does the story take place?", "What are the key locations?", "How does the setting affect the plot?"]
+
+"How did the character feel?" → ["What was the character's emotional reaction?", "How did the character's feelings change?", "What did the character experience?", "What were the character's thoughts?"]
+
+Return ONLY a Python list of strings, no explanations, no other text: ["query1", "query2", "query3"]"""
+        
+        for attempt in range(retry_limit):
+            try:
+                broadened_prompt = broaden_prompt.format(query=query_text)
+                model = os.getenv("PROMPT_REWRITE_MODEL", "qwen3:0.6b")
+                rewritten = self.openai.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a query expansion assistant. Return ONLY a Python list of strings. No thinking, no explanations, no other text."},
+                        {"role": "user", "content": broadened_prompt},
+                    ],
+                )
+                response_text = (
+                    rewritten.choices[0].message.content
+                    if rewritten and rewritten.choices
+                    else None
+                )
+                
+                if not response_text:
+                    print(f"⚠️ Attempt {attempt + 1}: Empty response from LLM")
+                    continue
+                
+                # Clean and parse the response
+                broadened_queries = self._parse_broadened_queries(response_text)
+                if broadened_queries:
+                    return broadened_queries
+                else:
+                    print(f"⚠️ Attempt {attempt + 1}: Failed to parse valid queries")
+                    
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt + 1}: Exception - {e}")
+                if attempt == retry_limit - 1:
+                    print(f"❌ All {retry_limit} attempts failed")
+                continue
+        
+        return None
+
+    def _parse_broadened_queries(self, response_text: str) -> Optional[List[str]]:
+        """Parse broadened queries from LLM response."""
+        try:
+            # Clean the response text
+            response_text = response_text.strip()
+            
+            # Remove thinking tags if present
+            if '<think>' in response_text and '</think>' in response_text:
+                start = response_text.find('</think>') + len('</think>')
+                response_text = response_text[start:].strip()
+            
+            # Remove any markdown code blocks if present
+            if response_text.startswith('```'):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            # Extract the list from the response using regex
+            list_pattern = r'\[.*?\]'
+            matches = re.findall(list_pattern, response_text, re.DOTALL)
+            if matches:
+                response_text = matches[0]
+            
+            broadened_queries = ast.literal_eval(response_text)
+            if isinstance(broadened_queries, list) and all(isinstance(q, str) for q in broadened_queries):
+                return broadened_queries
+            else:
+                return None
+                
+        except (ValueError, SyntaxError) as e:
+            print(f"⚠️ Parsing error: {e}")
+            return None
+
+    def _clean_query_text(self, query_text: str) -> str:
+        """Clean query text to ensure it's safe for search."""
+        if not query_text or not isinstance(query_text, str):
+            return ""
+        
+        # Remove any thinking tags that might have leaked through
+        if '<think>' in query_text and '</think>' in query_text:
+            start = query_text.find('</think>') + len('</think>')
+            query_text = query_text[start:].strip()
+        
+        # Remove any markdown code blocks
+        if query_text.startswith('```'):
+            lines = query_text.split('\n')
+            query_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else ""
+        
+        query_text = re.sub(r'\([^)]*shortened[^)]*\)', '', query_text, flags=re.IGNORECASE)
+        query_text = re.sub(r'\([^)]*concise[^)]*\)', '', query_text, flags=re.IGNORECASE)
+        
+        # Replace multiple line breaks and spaces with single spaces
+        query_text = re.sub(r'\s+', ' ', query_text)
+        
+        # Remove any non-printable characters except basic punctuation
+        query_text = ''.join(char for char in query_text if char.isprintable() or char.isspace())
+        query_text = query_text.strip()
+        
+        # Limit query length to prevent issues (reduce from 10000 to 2000)
+        if len(query_text) > 2000:
+            query_text = query_text[:2000]
+        
+        # Ensure query ends properly (remove trailing punctuation issues)
+        query_text = query_text.rstrip('.,;:!?')
+        
+        return query_text
+
     def query(
         self,
         query: str,
         rewrite: bool = True,
         chat_history: Optional[List[str]] = None,
-        context_chunk_size: int = 128,
+        broaden_query: bool = True,
+        broaden_retry_limit: int = 3,
+        context_chunk_size: int = 256,
         rerank: bool = True,
-        compress: bool = True,
-        limit: int = 10,
+        compress: bool = False,
+        limit: int = 20,
     ):
         query_text = query
         if rewrite:
@@ -204,17 +324,40 @@ class HybridRAGPipeline:
             except Exception:
                 query_text = query
 
+        if broaden_query:
+            # Store original query as backup
+            original_query_text = query_text
+            broadened_queries = self._broaden_query_with_retry(query_text, broaden_retry_limit)
+            if broadened_queries:
+                # Add original query and broadened queries as a list
+                all_queries = [original_query_text] + broadened_queries
+                # Keep queries as a list instead of concatenating
+                query_text = all_queries
+            else:
+                print("⚠️ Query broadening failed after all retries, using original query")
+                # Ensure we use the original clean query
+                query_text = original_query_text
+
+        # Ensure query_text is a list and clean each query
+        if isinstance(query_text, str):
+            query_text = [self._clean_query_text(query_text)]
+        elif isinstance(query_text, list):
+            query_text = [self._clean_query_text(q) for q in query_text if q]
+        else:
+            query_text = [self._clean_query_text(str(query_text))]
+
+        
         vector_results = self.vector_rag.query(query_text, limit=limit)
         
         # Try to get graph answer, but handle gracefully if it fails
         try:
+            # GraphRAG query expects a list of strings - query_text is already a list
             graph_answer = self.graph_rag.query(query_text)
             # Only include graph answer if it's not empty
-            if not graph_answer or not graph_answer.strip():
+            if not graph_answer or (isinstance(graph_answer, list) and not any(g.strip() for g in graph_answer)):
                 graph_answer = None
         except Exception as e:
             print(f"⚠️  GraphRAG query failed: {e}")
-            print("Continuing with vector-only search...")
             graph_answer = None
 
         # Handle HybridHits objects from Milvus
@@ -235,34 +378,81 @@ class HybridRAGPipeline:
             refined_chunks = self.context_chunker.process_results(vector_texts)
             vector_texts = [chunk["text"] for chunk in refined_chunks if "text" in chunk]
 
-        if rerank and vector_texts:
-            vector_texts = self.service.rerank_documents(vector_texts, query_text)
-
-        # Prioritize GraphRAG answer if available
         results = []
-        if graph_answer is not None and graph_answer.strip() and "No relevant information found" not in graph_answer:
+        if graph_answer is not None:
             # GraphRAG found a good answer - use it as primary result
-            results = [graph_answer]
+            results = graph_answer
             # Add top vector results as supplementary information
             if vector_texts:
-                results.extend(vector_texts[:limit-1])  # Top 2 vector results as supplement
+                results.extend(vector_texts)  # Top vector results as supplement
         else:
             # Fallback to vector results only
             results = vector_texts
 
+        if rerank and vector_texts:
+            # Ensure query_text is a string for rerank
+            rerank_query = query_text if isinstance(query_text, str) else " ".join(query_text) if isinstance(query_text, list) else str(query_text)
+            vector_texts = self.service.rerank_documents(vector_texts, rerank_query)
+            # Update results if we used vector_texts
+            if not (graph_answer is not None and isinstance(graph_answer, str) and graph_answer.strip() and "No relevant information found" not in graph_answer):
+                results = vector_texts
+                
+        results = results[:limit]
+
         if compress:
-            compressed_result = self.service.compress_prompt(query_text, results)
+            # Ensure query_text is a string for compress
+            compress_query = query_text if isinstance(query_text, str) else " ".join(query_text) if isinstance(query_text, list) else str(query_text)
+            compressed_result = self.service.compress_prompt(compress_query, results)
             # If compression fails or returns empty, return the original results
             if compressed_result and compressed_result.strip():
-                # Return compressed summary + GraphRAG answer (if available) + top vector results
-                # final_results = [compressed_result]
-                # if graph_answer is not None:
-                #     final_results.append(graph_answer)
-                # final_results.extend(vector_texts[:limit-1])  # Top 2 vector results
                 return [compressed_result]
             else:
                 return results
+
         return results
+        # Fallback: if results are too short, retry with higher limit and relaxed processing
+        # if not results or sum(len(r) for r in results) < 300:
+        #     try:
+        #         more_vector = self.vector_rag.query(query_text, limit=max(limit, 40))
+        #         more_texts: List[str] = []
+        #         for hit in more_vector:
+        #             for hit_item in hit:
+        #                 if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
+        #                     more_texts.append(hit_item.entity.content)
+        #                 elif isinstance(hit_item, dict) and 'entity' in hit_item:
+        #                     more_texts.append(hit_item['entity'].get('content', ''))
+        #         more_texts = [t for t in more_texts if t]
+        #         if more_texts:
+        #             # Entity-aware post filter (general)
+        #             prioritized = more_texts  # Use all texts without hardcoded filtering
+        #             if prioritized:
+        #                 return prioritized[:max(limit, 20)]
+        #             return more_texts[:max(limit, 20)]
+        #     except Exception:
+        #         pass
+
+        # # Final fallback: scan GraphRAG docstore for general content and append snippets
+        # try:
+        #     need_content = not results or len(results) < 3
+        #     if need_content and hasattr(self.graph_rag, 'index') and hasattr(self.graph_rag.index, 'docstore'):
+        #         docs = list(self.graph_rag.index.docstore.docs.values())
+        #         snippets: List[str] = []
+        #         for node in docs:
+        #             text = getattr(node, 'text', None)
+        #             if not text:
+        #                 continue
+        #             # extract a concise snippet from the text
+        #             if len(text) > 80:
+        #                 snippet = text[:600]  # Take first 600 characters
+        #                 if len(snippet) > 80:
+        #                         snippets.append(snippet)
+        #             if len(snippets) >= max(5, limit):
+        #                 break
+        #         if snippets:
+        #             return (results or []) + snippets[:max(5, limit)]
+        # except Exception:
+        #     pass
+        # return results
 
     # def fast_query(
     #     self, 
@@ -417,7 +607,6 @@ class HybridRAGPipeline:
 def main():
     """Main CLI entry point for HybridRAG pipeline."""
     import argparse
-    import sys
     from pathlib import Path
     
     parser = argparse.ArgumentParser(description="HybridRAG Pipeline")

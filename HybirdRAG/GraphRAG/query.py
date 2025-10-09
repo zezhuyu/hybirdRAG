@@ -21,24 +21,15 @@ class GraphRAGQueryEngine(CustomQueryEngine):
             # Get all nodes quickly
             all_nodes = list(self.index.docstore.docs.values())
             
-            # Filter nodes by query relevance with intelligent matching
+            # Filter nodes by query relevance using simple term matching
             query_terms = query_str.lower().split()
             relevant_nodes = []
-            
-            # Expand query terms for better matching
-            expanded_terms = query_terms.copy()
-            if "narrator" in query_str.lower():
-                expanded_terms.extend(["walton", "robert", "captain", "margaret", "sister", "letter", "dear", "st petersburg", "archangel"])
-            if "beginning" in query_str.lower():
-                expanded_terms.extend(["start", "first", "commence", "voyage", "expedition", "discovery"])
-            if "frankenstein" in query_str.lower():
-                expanded_terms.extend(["victor", "creature", "monster"])
             
             for node in all_nodes:
                 if hasattr(node, 'text') and node.text:
                     node_text = node.text.lower()
-                    # Check if node contains any query terms or expanded terms
-                    if any(term in node_text for term in query_terms) or any(term in node_text for term in expanded_terms):
+                    # Check if node contains any query terms
+                    if any(term in node_text for term in query_terms):
                         relevant_nodes.append(node)
         
             if len(relevant_nodes) == 0:
@@ -61,20 +52,24 @@ class GraphRAGQueryEngine(CustomQueryEngine):
                         clean_text = ' '.join(clean_text.split())
                         
                         # Categorize content
-                        if any(term in clean_text.lower() for term in ["project gutenberg", "gutenberg", "etext", "donation", "copyright", "foundation", "archive", "tax-deductible", "irs", "university ave"]):
+                        if any(term in clean_text.lower() for term in [
+                            "project gutenberg", "gutenberg", "etext", "donation", "copyright",
+                            "foundation", "archive", "tax-deductible", "irs", "university ave",
+                            "legal small print"
+                        ]):
                             metadata_content.append(clean_text[:2000])  # Increased limit
                         else:
                             story_content.append(clean_text[:2000])  # Increased limit
+
+            # relevant_texts = story_content + metadata_content
+            # answer = ""
+            # for i, text in enumerate(relevant_texts, 1):  # Increased from 3 to 5
+            #     answer += f"{i}. {text}\n\n"
+            # return answer
+
             
-            # Prioritize narrator content specifically
-            narrator_content = []
-            for content in story_content:
-                if any(term in content.lower() for term in ["walton", "robert", "captain", "margaret", "sister", "letter", "dear", "st petersburg", "archangel", "voyage", "expedition", "discovery", "north", "pole", "uncle thomas", "saville"]):
-                    narrator_content.append(content)
-            
-            if narrator_content:
-                relevant_texts = narrator_content[:5]  # Use up to 5 narrator items
-            elif story_content:
+            # Use story content for general queries
+            if story_content:
                 relevant_texts = story_content[:5]  # Use up to 5 story items
             else:
                 relevant_texts = metadata_content[:3]  # Use up to 3 metadata items as fallback
@@ -83,7 +78,7 @@ class GraphRAGQueryEngine(CustomQueryEngine):
                 # Create a structured answer based on the query
                 if "react" in query_str.lower() or "reaction" in query_str.lower():
                     # For reaction queries, provide a structured analysis
-                    answer = f"Based on the text analysis, here's how Victor reacts:\n\n"
+                    answer = f"Based on the text analysis, here's how the character reacts:\n\n"
                     for i, text in enumerate(relevant_texts[:5], 1):  # Increased from 3 to 5
                         answer += f"{i}. {text}\n\n"
                     return answer
@@ -100,7 +95,7 @@ class GraphRAGQueryEngine(CustomQueryEngine):
                         answer += f"{i}. {text}\n\n"
                     return answer
             else:
-                return "No relevant information found for this query."
+                return ""
                 
         except Exception as e:
             print(f"⚠️  Ultra-fast retrieval failed: {e}")

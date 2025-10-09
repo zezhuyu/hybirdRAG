@@ -72,37 +72,104 @@ class VectorRAGPipeline:
 
     def add_document(self, document: List[dict]):
         for doc in document:
-            doc["vector"] = self.embedding.embed_sentence(doc["content"])
+            doc["vector"] = list(self.embedding.embed_sentence(doc["content"]))
             doc['add_at'] = int(doc.get("add_at", time.time()))
             # Add default values for required fields
             doc['chapter'] = doc.get('chapter', 0)
             doc['section'] = doc.get('section', 0)
         self.milvus.insert(collection_name=self.collection_name, data=document)
 
-    def query(self, query: str, limit: int = 10, filters: List[str] = None):
-        query_embedding = self.embedding.embed_sentence(query)
+    def _deduplicate_results(self, results):
+        """Deduplicate search results based on block IDs."""
+        if not results:
+            return results
+        
+        deduplicated = []
+        seen_ids = set()
+        
+        for hit in results:
+            if hasattr(hit, '__iter__'):  # Handle HybridHits
+                hit_deduplicated = []
+                for hit_item in hit:
+                    # Get block ID from the hit item
+                    block_id = self._get_block_id(hit_item)
+                    if block_id and block_id not in seen_ids:
+                        seen_ids.add(block_id)
+                        hit_deduplicated.append(hit_item)
+                
+                if hit_deduplicated:
+                    # Create a new hit object with deduplicated items
+                    deduplicated.append(hit_deduplicated)
+            else:
+                # Handle individual hit items
+                block_id = self._get_block_id(hit)
+                if block_id and block_id not in seen_ids:
+                    seen_ids.add(block_id)
+                    deduplicated.append(hit)
+        
+        return deduplicated
+
+    def _get_block_id(self, hit_item):
+        """Extract block ID from a hit item."""
+        try:
+            # Try different ways to get the ID
+            if hasattr(hit_item, 'id'):
+                return str(hit_item.id)
+            elif hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'id'):
+                return str(hit_item.entity.id)
+            elif isinstance(hit_item, dict):
+                if 'id' in hit_item:
+                    return str(hit_item['id'])
+                elif 'entity' in hit_item and isinstance(hit_item['entity'], dict) and 'id' in hit_item['entity']:
+                    return str(hit_item['entity']['id'])
+            
+            return None
+        except Exception:
+            return None
+
+    def query(self, query: List[str], limit: int = 10, filters: List[str] = None):
+        # Handle both single query and list of queries
+        if isinstance(query, str):
+            query_list = [query]
+        else:
+            query_list = query
+        
+        # For multiple queries, we'll combine them into a single embedding
+        # This gives us better coverage across all query terms
+        query_embedding = self.embedding.embed_batch(query_list)
+        
         search_params = {
             "output_fields": ["id", "content", "add_at", "chapter", "section"]
         }
         if filters:
-            search_params["filter"] = " AND ".join(filter)
+            search_params["filter"] = " AND ".join(filters)
+
         sparse_search_params = search_params.copy()
         sparse_search_params["params"] = {'drop_ratio_search': 0.6}
+
         full_text_search_params = {"metric_type": "BM25"}
         full_text_search_req = AnnSearchRequest(
-            [query], "sparse", full_text_search_params, limit=limit
+            query_list, "sparse", full_text_search_params, limit=limit
         )
 
         dense_search_params = {"metric_type": "COSINE"}
         dense_req = AnnSearchRequest(
-            [query_embedding], "vector", dense_search_params, limit=limit
+            query_embedding, "vector", dense_search_params, limit=limit
         )
-        results = self.milvus.hybrid_search(
+
+            
+        # Use simple vector search instead of hybrid search to avoid the error
+        try:
+            results = self.milvus.hybrid_search(
                     self.collection_name,
                     [full_text_search_req, dense_req],
                     ranker=RRFRanker(),
                     limit=limit,
                     **sparse_search_params
                 )
-
-        return results
+            # Deduplicate results before returning
+            deduplicated_results = self._deduplicate_results(results)
+            return deduplicated_results
+        except Exception as e:
+            print(f"Vector search failed: {e}")
+            # Fallback to simple vector search

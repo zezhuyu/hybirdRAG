@@ -483,7 +483,67 @@ class GraphRAGPipeline:
     def build_communities(self) -> None:
         self.graph_store.build_communities()
 
-    def query(self, query: str) -> str:
+    def _deduplicate_graph_results(self, results: List[str]) -> List[str]:
+        """Deduplicate GraphRAG results based on content similarity."""
+        if not results:
+            return results
+        
+        # For query broadening, we want to keep diverse responses even if they're similar
+        # Only remove exact duplicates or very short responses
+        deduplicated = []
+        seen_content = set()
+        
+        for result in results:
+            if result and result.strip() and len(result.strip()) > 50:  # Keep substantial responses
+                # Only remove exact duplicates (normalized)
+                normalized_content = result.strip().lower()
+                if normalized_content not in seen_content:
+                    seen_content.add(normalized_content)
+                    deduplicated.append(result)
+        
+        return deduplicated
+
+    def _get_nodes_for_query(self, query_str: str):
+        """Get nodes and their IDs for a query."""
+        # Get all nodes quickly
+        all_nodes = list(self.index.docstore.docs.values())
+        
+        # Filter nodes by query relevance using simple term matching
+        query_terms = query_str.lower().split()
+        relevant_nodes = []
+        
+        for node in all_nodes:
+            if hasattr(node, 'text') and node.text:
+                node_text = node.text.lower()
+                # Check if node contains any query terms
+                if any(term in node_text for term in query_terms):
+                    relevant_nodes.append((node, getattr(node, 'id_', getattr(node, 'node_id', None))))
+        
+        if len(relevant_nodes) == 0:
+            # Fallback: use first few nodes
+            relevant_nodes = [(node, getattr(node, 'id_', getattr(node, 'node_id', None))) for node in all_nodes[:5]]
+            print("⚠️  No relevant nodes found, using fallback")
+        
+        return relevant_nodes
+
+    def _generate_response_from_nodes(self, nodes, query_str):
+        """Generate response from a list of nodes."""
+        # Extract and clean text
+        relevant_texts = []
+        for node in nodes:
+            if hasattr(node, 'text') and node.text:
+                clean_text = node.text.strip()
+                if clean_text and len(clean_text) > 50:  # Filter out very short text
+                    relevant_texts.append(clean_text)
+        
+        if not relevant_texts:
+            return ""
+        
+        # Join texts and return (similar to query engine logic)
+        combined_text = " ".join(relevant_texts[:5])  # Limit to top 5 texts
+        return combined_text[:2000]  # Limit length
+
+    def query(self, query: List[str]) -> str:
         if self.index is None:
             try:
                 self.load_index()
@@ -497,135 +557,155 @@ class GraphRAGPipeline:
                 index=self.index,
                 similarity_top_k=10,
             )
-        return self.query_engine.custom_query(query)
 
-    def fast_query(self, query: str, max_communities: int = 5) -> Dict[str, Any]:
-        """
-        🚀 Ultra-fast query that returns raw data in 1-2 seconds.
-        Skips expensive LLM processing during retrieval - perfect for downstream LLM processing.
-        """
-        import time
-        from typing import Dict, Any, List
+        result = []
         
-        start_time = time.time()
+        for q in query:
+            # Get nodes and their IDs from the query engine
+            nodes_with_ids = self._get_nodes_for_query(q)
+            
+            if nodes_with_ids:
+                # Generate response from all nodes for this query (no cross-query deduplication)
+                nodes = [node for node, node_id in nodes_with_ids]
+                response = self._generate_response_from_nodes(nodes, q)
+                if response and response.strip():
+                    result.append(response)
         
-        if self.index is None:
-            try:
-                self.load_index()
-            except ValueError as exc:
-                raise ValueError("Index is not built and no persisted index found.") from exc
-        
-        try:
-            # 🚀 Step 1: Fast entity extraction (simplified)
-            entities = self._fast_extract_entities(query)
-            step1_time = time.time() - start_time
-            
-            # 🚀 Step 2: Lightning-fast community lookup
-            community_data = self._fast_get_communities(entities, max_communities)
-            step2_time = time.time() - start_time
-            
-            # 🚀 Step 3: Return raw data (no LLM calls!)
-            result = {
-                "query": query,
-                "entities": entities[:10],
-                "communities": community_data,
-                "total_retrieval_time": time.time() - start_time,
-                "performance_breakdown": {
-                    "entity_extraction": step1_time,
-                    "community_lookup": step2_time - step1_time,
-                    "data_formatting": time.time() - start_time - step2_time
-                },
-                "optimization_note": "Raw data returned - no LLM processing during retrieval"
-            }
-            
-            
+        # For query broadening, keep all responses to provide diverse perspectives
+        # Only deduplicate if we have many responses (>10) to avoid overwhelming the user
+        if len(result) > 10:
+            deduplicated_result = self._deduplicate_graph_results(result)
+            return deduplicated_result
+        else:
             return result
-            
-        except Exception as e:
-            print(f"⚠️  Fast query failed: {e}")
-            return {
-                "query": query,
-                "entities": [],
-                "communities": [],
-                "total_retrieval_time": time.time() - start_time,
-                "error": str(e)
-            }
 
-    def _fast_extract_entities(self, query: str) -> List[str]:
-        """Fast entity extraction optimized for speed."""
-        import re
+    # def fast_query(self, query: str, max_communities: int = 5) -> Dict[str, Any]:
+    #     """
+    #     🚀 Ultra-fast query that returns raw data in 1-2 seconds.
+    #     Skips expensive LLM processing during retrieval - perfect for downstream LLM processing.
+    #     """
+    #     import time
+    #     from typing import Dict, Any, List
         
-        try:
-            # Use minimal similarity search for speed
-            nodes_retrieved = self.index.as_retriever(similarity_top_k=5).retrieve(query)
+    #     start_time = time.time()
+        
+    #     if self.index is None:
+    #         try:
+    #             self.load_index()
+    #         except ValueError as exc:
+    #             raise ValueError("Index is not built and no persisted index found.") from exc
+        
+    #     try:
+    #         # 🚀 Step 1: Fast entity extraction (simplified)
+    #         entities = self._fast_extract_entities(query)
+    #         step1_time = time.time() - start_time
             
-            entities = set()
+    #         # 🚀 Step 2: Lightning-fast community lookup
+    #         community_data = self._fast_get_communities(entities, max_communities)
+    #         step2_time = time.time() - start_time
             
-            # Extract entities from top nodes only
-            for node in nodes_retrieved[:3]:  # Limit for speed
-                # Structured extraction (original method)
-                matches = re.findall(
-                    r"^(\w+(?:\s+\w+)*)\s*->\s*([a-zA-Z\s]+?)\s*->\s*(\w+(?:\s+\w+)*)$",
-                    node.text, re.MULTILINE | re.IGNORECASE
-                )
-                
-                for match in matches:
-                    entities.add(match[0].strip())
-                    entities.add(match[2].strip())
+    #         # 🚀 Step 3: Return raw data (no LLM calls!)
+    #         result = {
+    #             "query": query,
+    #             "entities": entities[:10],
+    #             "communities": community_data,
+    #             "total_retrieval_time": time.time() - start_time,
+    #             "performance_breakdown": {
+    #                 "entity_extraction": step1_time,
+    #                 "community_lookup": step2_time - step1_time,
+    #                 "data_formatting": time.time() - start_time - step2_time
+    #             },
+    #             "optimization_note": "Raw data returned - no LLM processing during retrieval"
+    #         }
             
-            # Fallback: extract from query itself
-            query_entities = re.findall(r'\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)*)\b', query)
-            entities.update(query_entities)
             
-            # Filter and limit
-            entity_list = [e for e in entities if len(e) > 2][:15]
-            return entity_list
+    #         return result
             
-        except Exception as e:
-            # Emergency fallback
-            return re.findall(r'\b([A-Z][a-z]+)\b', query)[:5]
+    #     except Exception as e:
+    #         print(f"⚠️  Fast query failed: {e}")
+    #         return {
+    #             "query": query,
+    #             "entities": [],
+    #             "communities": [],
+    #             "total_retrieval_time": time.time() - start_time,
+    #             "error": str(e)
+    #         }
 
-    def _fast_get_communities(self, entities: List[str], max_communities: int = 5) -> List[Dict[str, Any]]:
-        """Lightning-fast community retrieval."""
-        try:
-            # Get cached community summaries
-            all_communities = self.graph_store.get_community_summaries()
-            entity_info = self.graph_store.entity_info
+    # def _fast_extract_entities(self, query: str) -> List[str]:
+    #     """Fast entity extraction optimized for speed."""
+    #     import re
+        
+    #     try:
+    #         # Use minimal similarity search for speed
+    #         nodes_retrieved = self.index.as_retriever(similarity_top_k=5).retrieve(query)
             
-            community_scores = {}
+    #         entities = set()
             
-            # Score communities based on entity matches
-            for entity in entities:
-                if entity in entity_info:
-                    for comm_id in entity_info[entity]:
-                        if comm_id in all_communities:
-                            if comm_id not in community_scores:
-                                community_scores[comm_id] = {
-                                    "score": 0,
-                                    "matched_entities": []
-                                }
-                            community_scores[comm_id]["score"] += 1
-                            community_scores[comm_id]["matched_entities"].append(entity)
+    #         # Extract entities from top nodes only
+    #         for node in nodes_retrieved[:3]:  # Limit for speed
+    #             # Structured extraction (original method)
+    #             matches = re.findall(
+    #                 r"^(\w+(?:\s+\w+)*)\s*->\s*([a-zA-Z\s]+?)\s*->\s*(\w+(?:\s+\w+)*)$",
+    #                 node.text, re.MULTILINE | re.IGNORECASE
+    #             )
+                
+    #             for match in matches:
+    #                 entities.add(match[0].strip())
+    #                 entities.add(match[2].strip())
             
-            # Create result list with summaries
-            results = []
-            for comm_id, data in community_scores.items():
-                summary = all_communities[comm_id]
-                results.append({
-                    "community_id": comm_id,
-                    "summary": summary,
-                    "score": data["score"],
-                    "matched_entities": data["matched_entities"],
-                    "summary_preview": summary[:200] + "..." if len(summary) > 200 else summary
-                })
+    #         # Fallback: extract from query itself
+    #         query_entities = re.findall(r'\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)*)\b', query)
+    #         entities.update(query_entities)
             
-            # Sort by score and limit
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:max_communities]
+    #         # Filter and limit
+    #         entity_list = [e for e in entities if len(e) > 2][:15]
+    #         return entity_list
             
-        except Exception as e:
-            print(f"⚠️  Community retrieval failed: {e}")
-            return []
+    #     except Exception as e:
+    #         # Emergency fallback
+    #         return re.findall(r'\b([A-Z][a-z]+)\b', query)[:5]
+
+    # def _fast_get_communities(self, entities: List[str], max_communities: int = 5) -> List[Dict[str, Any]]:
+    #     """Lightning-fast community retrieval."""
+    #     try:
+    #         # Get cached community summaries
+    #         all_communities = self.graph_store.get_community_summaries()
+    #         entity_info = self.graph_store.entity_info
+            
+    #         community_scores = {}
+            
+    #         # Score communities based on entity matches
+    #         for entity in entities:
+    #             if entity in entity_info:
+    #                 for comm_id in entity_info[entity]:
+    #                     if comm_id in all_communities:
+    #                         if comm_id not in community_scores:
+    #                             community_scores[comm_id] = {
+    #                                 "score": 0,
+    #                                 "matched_entities": []
+    #                             }
+    #                         community_scores[comm_id]["score"] += 1
+    #                         community_scores[comm_id]["matched_entities"].append(entity)
+            
+    #         # Create result list with summaries
+    #         results = []
+    #         for comm_id, data in community_scores.items():
+    #             summary = all_communities[comm_id]
+    #             results.append({
+    #                 "community_id": comm_id,
+    #                 "summary": summary,
+    #                 "score": data["score"],
+    #                 "matched_entities": data["matched_entities"],
+    #                 "summary_preview": summary[:200] + "..." if len(summary) > 200 else summary
+    #             })
+            
+    #         # Sort by score and limit
+    #         results.sort(key=lambda x: x["score"], reverse=True)
+    #         return results[:max_communities]
+            
+    #     except Exception as e:
+    #         print(f"⚠️  Community retrieval failed: {e}")
+    #         return []
     
     def _patch_vector_context_retriever(self):
         """Patch the VectorContextRetriever to fix the supports_vector_queries bug."""
