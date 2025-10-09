@@ -7,10 +7,11 @@ import re
 from openai import OpenAI
 from pymilvus import MilvusClient
 
-from .VectorRAG.pipeline import VectorRAGPipeline
+from .VectorRAG.pipeline import VectorRAGPipeline, DIMENSION
 from .VectorRAG.text_processing import ContextualChunker, LateChunker
 
-from .GraphRAG.convertObj import OpenAILLMWrapper, MLModelEmbeddingWrapper
+from .GraphRAG.convertObj import OpenAILLMWrapper, MLModelEmbeddingWrapper, OpenAIEmbeddingsWrapper
+from .VectorRAG.convertObj import OpenAIEmbeddingClient
 from .GraphRAG.pipeline import GraphRAGPipeline
 from .GraphRAG.store import GraphRAGStore, NEO4J_AVAILABLE
 
@@ -114,17 +115,17 @@ class HybridRAGPipeline:
         # Use the configured milvus_client_kwargs directly
         self.milvus = MilvusClient(**milvus_client_kwargs)
 
-        self.vector_rag = VectorRAGPipeline(
-            milvus=self.milvus,
-            embedding=self.service,
-            collection_name=vector_collection_name,
-        )
-
         base_url = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1/"
         if not base_url.endswith('/v1') and not base_url.endswith('/v1/'):
             base_url = base_url.rstrip('/') + '/v1/'
         self.openai = OpenAI(api_key=openai_api_key, base_url=base_url)
         self.graph_llm = OpenAILLMWrapper(client=self.openai)
+
+        self.vector_rag = VectorRAGPipeline(
+            milvus=self.milvus,
+            embedding=OpenAIEmbeddingClient(self.openai),
+            collection_name=vector_collection_name,
+        )
         
         # Set the LLM in global settings for all llama-index operations
         from llama_index.core import Settings
@@ -148,13 +149,13 @@ class HybridRAGPipeline:
             # Fallback to simple graph store
             self.graph_store = GraphRAGStore(summarizer_llm=self.graph_llm)
 
-        embedding_wrapper = MLModelEmbeddingWrapper(self.service)
+        embedding_wrapper = OpenAIEmbeddingsWrapper(self.openai)
         
         # Use the same Milvus collection for GraphRAG as the main vector store
         graph_milvus_kwargs = {
             "host": milvus_host,
             "collection_name": vector_collection_name,  # Use same collection
-            "dim": 768,  # Same dimension as main vector store
+            "dim": DIMENSION,  # Same dimension as main vector store
         }
         if milvus_client_kwargs:
             graph_milvus_kwargs.update(milvus_client_kwargs)
@@ -371,7 +372,6 @@ Return ONLY a Python list of strings, no explanations, no other text: ["query1",
                     vector_texts.append(hit_item['entity'].get('content', ''))
         
         vector_texts = [text for text in vector_texts if text]
-        
 
         if context_chunk_size > 0 and vector_texts:
             self.context_chunker.max_chunk_size = context_chunk_size
@@ -396,7 +396,7 @@ Return ONLY a Python list of strings, no explanations, no other text: ["query1",
             # Update results if we used vector_texts
             if not (graph_answer is not None and isinstance(graph_answer, str) and graph_answer.strip() and "No relevant information found" not in graph_answer):
                 results = vector_texts
-                
+
         results = results[:limit]
 
         if compress:

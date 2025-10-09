@@ -166,13 +166,13 @@ class OpenAIEmbeddingsWrapper(BaseEmbedding):
         )
         return [data.embedding for data in response.data]
 
-    async def _get_query_embedding(self, query: str) -> List[float]:
+    async def _aget_query_embedding(self, query: str) -> List[float]:
         return self._get_query_embedding(query)
 
-    async def _get_text_embedding(self, text: str) -> List[float]:
+    async def _aget_text_embedding(self, text: str) -> List[float]:
         return self._get_text_embedding(text)
 
-    async def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
         return self._get_text_embeddings(texts)
 
 class GRPCEmbeddingsWrapper(BaseEmbedding):
