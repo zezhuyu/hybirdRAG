@@ -60,13 +60,6 @@ class GraphRAGQueryEngine(CustomQueryEngine):
                             metadata_content.append(clean_text[:2000])  # Increased limit
                         else:
                             story_content.append(clean_text[:2000])  # Increased limit
-
-            # relevant_texts = story_content + metadata_content
-            # answer = ""
-            # for i, text in enumerate(relevant_texts, 1):  # Increased from 3 to 5
-            #     answer += f"{i}. {text}\n\n"
-            # return answer
-
             
             # Use story content for general queries
             if story_content:
