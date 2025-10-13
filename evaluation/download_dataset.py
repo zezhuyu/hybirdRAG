@@ -22,7 +22,7 @@ os.makedirs("data", exist_ok=True)
 DOWNLOAD_URL = "https://www.dropbox.com/s/npidmtadreo6df2/data.zip?dl=1"
 ZIP_FILENAME = "data.zip"
 DATA_DIR = "data/data"
-OUTPUT_FILE = os.path.join(DATA_DIR, "2wiki_dev_converted.json")
+OUTPUT_FILE = os.path.join(DATA_DIR, "../2wiki_dev_converted.json")
 
 def download_and_unzip():
     if not os.path.exists(ZIP_FILENAME):
