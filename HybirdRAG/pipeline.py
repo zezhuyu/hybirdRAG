@@ -28,6 +28,17 @@ given the user chat history and query, rewrite the prompt to be more specific an
 # Query:
 """
 
+broaden_prompt = """Create 3-5 related search queries for: "{query}"
+
+Examples:
+"What happened to the main character?" → ["How did the main character develop?", "What challenges did the main character face?", "What was the main character's background?", "How did the main character change?"]
+
+"Tell me about the setting" → ["What is the environment like?", "Where does the story take place?", "What are the key locations?", "How does the setting affect the plot?"]
+
+"How did the character feel?" → ["What was the character's emotional reaction?", "How did the character's feelings change?", "What did the character experience?", "What were the character's thoughts?"]
+
+Return ONLY a Python list of strings, no explanations, no other text: ["query1", "query2", "query3"]"""
+
 
 class HybridRAGPipeline:
     def __init__(
@@ -177,16 +188,6 @@ class HybridRAGPipeline:
 
     def _broaden_query_with_retry(self, query_text: str, retry_limit: int = 3) -> Optional[List[str]]:
         """Broaden query with retry mechanism for better reliability."""
-        broaden_prompt = """Create 3-5 related search queries for: "{query}"
-
-Examples:
-"What happened to the main character?" → ["How did the main character develop?", "What challenges did the main character face?", "What was the main character's background?", "How did the main character change?"]
-
-"Tell me about the setting" → ["What is the environment like?", "Where does the story take place?", "What are the key locations?", "How does the setting affect the plot?"]
-
-"How did the character feel?" → ["What was the character's emotional reaction?", "How did the character's feelings change?", "What did the character experience?", "What were the character's thoughts?"]
-
-Return ONLY a Python list of strings, no explanations, no other text: ["query1", "query2", "query3"]"""
         
         for attempt in range(retry_limit):
             try:
