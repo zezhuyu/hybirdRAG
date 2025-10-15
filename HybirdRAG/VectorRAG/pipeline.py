@@ -41,7 +41,7 @@ schema.add_function(bm25_function)
 index_params.add_index(
     field_name="sparse",
     index_type="SPARSE_INVERTED_INDEX",
-    metric_type="BM25",
+    metric_type="IP",
     params={
         "inverted_index_algo": "DAAT_MAXSCORE",
         "bm25_k1": 1.2,
@@ -68,6 +68,21 @@ class VectorRAGPipeline:
         self.collection_name = collection_name
         if not self.milvus.has_collection(collection_name=collection_name):
             self.milvus.create_collection(collection_name=collection_name, schema=schema, index_params=self.index)
+        
+        # Load the collection to enable querying
+        try:
+            self.milvus.load_collection(collection_name=collection_name)
+        except Exception as e:
+            print(f"⚠️ Collection loading warning: {e}")
+            # Try to create indexes and reload
+            try:
+                print("🔄 Attempting to create indexes...")
+                self.milvus.create_index(collection_name=collection_name, index_params=self.index)
+                self.milvus.load_collection(collection_name=collection_name)
+                print("✅ Indexes created and collection loaded successfully")
+            except Exception as e2:
+                print(f"❌ Failed to create indexes: {e2}")
+                # Continue anyway
 
 
     def add_document(self, document: List[dict]):

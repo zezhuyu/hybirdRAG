@@ -9,7 +9,8 @@ comp.egg-info/
 *.png
 # C extensions
 *.so
-
+evaluation_outputs/
+*.pdf
 # Distribution / packaging
 .Python
 build/

@@ -24,68 +24,58 @@ Extract up to {max_knowledge_triplets} entities and their relationships.
 For each entity, extract: entity_name, entity_type, entity_description
 For each relationship, extract: source_entity, target_entity, relation, relationship_description
 
+IMPORTANT: Return ONLY valid JSON. No explanations, no markdown, no code blocks. Just the JSON.
+
 Return ONLY this JSON format (no other text):
-{{
+{
   "entities": [
-    {{"entity_name": "Entity Name", "entity_type": "Type", "entity_description": "Description"}}
+    {"entity_name": "Entity Name", "entity_type": "Type", "entity_description": "Description"}
   ],
   "relationships": [
-    {{"source_entity": "Source", "target_entity": "Target", "relation": "Relation", "relationship_description": "Description"}}
+    {"source_entity": "Source", "target_entity": "Target", "relation": "Relation", "relationship_description": "Description"}
   ]
-}}
+}
 
-If none found, return: {{"entities": [], "relationships": []}}
+If none found, return: {"entities": [], "relationships": []}
 
--An Output Example-
-{{
+Example output:
+{
   "entities": [
-    {{
+    {
       "entity_name": "Albert Einstein",
       "entity_type": "Person",
       "entity_description": "Albert Einstein was a theoretical physicist who developed the theory of relativity and made significant contributions to physics."
-    }},
-    {{
-      "entity_name": "Theory of Relativity",
-      "entity_type": "Scientific Theory",
-      "entity_description": "A scientific theory developed by Albert Einstein, describing the laws of physics in relation to observers in different frames of reference."
-    }},
-    {{
-      "entity_name": "Nobel Prize in Physics",
-      "entity_type": "Award",
-      "entity_description": "A prestigious international award in the field of physics, awarded annually by the Royal Swedish Academy of Sciences."
-    }}
+    }
   ],
   "relationships": [
-    {{
+    {
       "source_entity": "Albert Einstein",
       "target_entity": "Theory of Relativity",
       "relation": "developed",
       "relationship_description": "Albert Einstein is the developer of the theory of relativity."
-    }},
-    {{
-      "source_entity": "Albert Einstein",
-      "target_entity": "Nobel Prize in Physics",
-      "relation": "won",
-      "relationship_description": "Albert Einstein won the Nobel Prize in Physics in 1921."
-    }}
+    }
   ]
-}}
+}
 
--Real Data-
-######################
-text: {text}
-######################
-output:"""
+Text to analyze:
+{text}
+
+JSON output:"""
 
 def parse_fn(response_str: str) -> Any:
-    """Parse the LLM response to extract entities and relationships."""
+    """Parse the LLM response to extract entities and relationships with robust error handling."""
     entities = []
     relationships = []
     
     # Try to find JSON in the response - look for opening brace
     json_start = response_str.find('{')
     if json_start == -1:
-        return entities, relationships
+        # Try to extract data using regex patterns even without JSON structure
+        try:
+            partial_entities, partial_relationships = extract_partial_json(response_str)
+            return partial_entities, partial_relationships
+        except:
+            return entities, relationships
     
     # Extract everything from the first opening brace
     json_str = response_str[json_start:]
@@ -103,6 +93,7 @@ def parse_fn(response_str: str) -> Any:
     json_str = re.sub(r'\{\{', '{', json_str)  # Replace {{ with {
     json_str = re.sub(r'\}\}', '}', json_str)  # Replace }} with }
     
+    # Try multiple parsing strategies
     try:
         data = json.loads(json_str)
         
@@ -114,6 +105,7 @@ def parse_fn(response_str: str) -> Any:
                 entity.get("entity_description", ""),
             )
             for entity in data.get("entities", [])
+            if entity.get("entity_name") and entity.get("entity_name").strip()
         ]
         
         # Extract relationships
@@ -125,26 +117,22 @@ def parse_fn(response_str: str) -> Any:
                 relation.get("relationship_description", ""),
             )
             for relation in data.get("relationships", [])
+            if relation.get("source_entity") and relation.get("target_entity") and relation.get("relation")
         ]
         
         # Suppress parsing success messages to keep progress bar clean
         return entities, relationships
         
     except json.JSONDecodeError as e:
-        print(f"❌ JSON parsing error: {e}")
-        print(f"Raw response: {response_str[:200]}...")
-        
         # Try to extract partial data from malformed JSON
         try:
             partial_entities, partial_relationships = extract_partial_json(response_str)
             if partial_entities or partial_relationships:
-                print(f"⚠️  Extracted partial data: {len(partial_entities)} entities, {len(partial_relationships)} relationships")
                 return partial_entities, partial_relationships
         except:
             pass
         
         # If partial extraction also fails, return empty results (no retry to avoid infinite loops)
-        print("⚠️  No valid data could be extracted from malformed JSON")
         return entities, relationships
 
 
@@ -446,11 +434,35 @@ class GraphRAGPipeline:
         if not nodes:
             raise ValueError("No nodes supplied for index construction.")
 
-        processed_nodes = self.kg_extractor(
-            nodes, show_progress=False
-        )
+        # Process nodes with efficient batch processing
+        print(f"🔄 Extracting entities from {len(nodes)} nodes...")
+        
+        # Use smaller batches for better performance and error handling
+        batch_size = 20  # Increased batch size for efficiency
+        processed_nodes = []
+        total_batches = (len(nodes) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(nodes), batch_size):
+            batch = nodes[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            
+            try:
+                print(f"🔄 Processing batch {batch_num}/{total_batches} ({len(batch)} nodes)...")
+                batch_processed = self.kg_extractor(batch, show_progress=False)
+                processed_nodes.extend(batch_processed)
+                print(f"✅ Batch {batch_num} completed")
+                
+            except Exception as batch_error:
+                print(f"⚠️ Batch {batch_num} failed: {batch_error}")
+                print(f"🔄 Using original nodes for batch {batch_num}...")
+                processed_nodes.extend(batch)  # Use original nodes as fallback
+        
+        print(f"✅ Entity extraction completed: {len(processed_nodes)} nodes processed")
 
         if self.index is None:
+            # Ensure entities are properly processed before creating the index
+            self._process_extracted_entities(processed_nodes)
+            
             self.index = PropertyGraphIndex(
                 nodes=processed_nodes,
                 storage_context=self.storage_context,
@@ -460,6 +472,42 @@ class GraphRAGPipeline:
         else:
             self.index.insert_nodes(processed_nodes)
         return self.index
+
+    def _process_extracted_entities(self, nodes: List[BaseNode]) -> None:
+        """Process extracted entities and ensure they are properly stored in the graph."""
+        try:
+            total_entities = 0
+            total_relations = 0
+            
+            for node in nodes:
+                if hasattr(node, 'metadata'):
+                    # Extract entities and relations from metadata
+                    entities = node.metadata.get('nodes', [])
+                    relations = node.metadata.get('relations', [])
+                    
+                    if entities:
+                        total_entities += len(entities)
+                        # Store entities in the graph store
+                        try:
+                            self.graph_store.upsert_nodes(entities)
+                        except Exception as e:
+                            print(f"⚠️ Failed to store entities: {e}")
+                    
+                    if relations:
+                        total_relations += len(relations)
+                        # Store relations in the graph store
+                        try:
+                            self.graph_store.upsert_relations(relations)
+                        except Exception as e:
+                            print(f"⚠️ Failed to store relations: {e}")
+            
+            if total_entities > 0:
+                print(f"✅ Processed {total_entities} entities and {total_relations} relations")
+            else:
+                print(f"⚠️ No entities found in {len(nodes)} processed nodes")
+                
+        except Exception as e:
+            print(f"⚠️ Error processing extracted entities: {e}")
 
     def load_index(self) -> PropertyGraphIndex:
         """Load an existing index definition from the persistent stores."""
@@ -508,21 +556,64 @@ class GraphRAGPipeline:
         # Get all nodes quickly
         all_nodes = list(self.index.docstore.docs.values())
         
-        # Filter nodes by query relevance using simple term matching
+        # Filter nodes by query relevance using improved matching
         query_terms = query_str.lower().split()
+        # Remove common stop words for better matching, but keep question words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can'}
+        # Keep important question words and terms longer than 1 character
+        query_terms = [term for term in query_terms if term not in stop_words and len(term) > 1]
+        
+        # If no terms remain after filtering, use the original query as a fallback
+        if not query_terms:
+            query_terms = [query_str.lower().strip()]
+        
         relevant_nodes = []
         
         for node in all_nodes:
             if hasattr(node, 'text') and node.text:
                 node_text = node.text.lower()
-                # Check if node contains any query terms
-                if any(term in node_text for term in query_terms):
+                
+                # Multiple matching strategies
+                match_score = 0
+                
+                # Strategy 1: Exact term matching
+                for term in query_terms:
+                    if term in node_text:
+                        match_score += 1
+                
+                # Strategy 2: Partial word matching (for compound terms)
+                for term in query_terms:
+                    if any(term in word or word in term for word in node_text.split() if len(word) > 3):
+                        match_score += 0.5
+                
+                # Strategy 3: Semantic similarity (simple keyword expansion)
+                semantic_groups = {
+                    'person': ['person', 'people', 'individual', 'man', 'woman', 'human'],
+                    'place': ['place', 'location', 'city', 'country', 'state', 'region'],
+                    'time': ['time', 'year', 'date', 'period', 'era', 'century'],
+                    'event': ['event', 'incident', 'happening', 'occurrence', 'situation']
+                }
+                
+                for term in query_terms:
+                    for category, related_words in semantic_groups.items():
+                        if term in related_words:
+                            for related_word in related_words:
+                                if related_word in node_text:
+                                    match_score += 0.3
+                                    break
+                
+                # Accept nodes with any match
+                if match_score > 0:
                     relevant_nodes.append((node, getattr(node, 'id_', getattr(node, 'node_id', None))))
         
         if len(relevant_nodes) == 0:
             # Fallback: use first few nodes
             relevant_nodes = [(node, getattr(node, 'id_', getattr(node, 'node_id', None))) for node in all_nodes[:5]]
-            print("⚠️  No relevant nodes found, using fallback")
+            print(f"⚠️  No relevant nodes found for query '{query_str}' with terms {query_terms}, using fallback")
+            print(f"   Total nodes available: {len(all_nodes)}")
+            if all_nodes:
+                sample_node_text = all_nodes[0].text[:200] if hasattr(all_nodes[0], 'text') and all_nodes[0].text else "No text"
+                print(f"   Sample node text: {sample_node_text}...")
         
         return relevant_nodes
 

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .pipeline import HybridRAGPipeline
+from HybirdRAG.pipeline import HybridRAGPipeline
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--disable-rerank", action="store_true", help="Disable reranking of vector results.")
     parser.add_argument("--enable-compress", action="store_true", help="Enable compression of the final answer.")
     parser.add_argument("--context-chunk-size", type=int, default=256, help="Context chunk size forwarded to the pipeline.")
-    parser.add_argument("--retrieval-limit", type=int, default=20, help="Number of results to request from the pipeline.")
+    parser.add_argument("--retrieval-limit", type=int, default=50, help="Number of results to request from the pipeline.")
 
     return parser.parse_args(argv)
 
@@ -391,7 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     query_kwargs = {
         "rewrite": not args.disable_rewrite,
-        "broaden_query": not args.disable_broaden,
+        "broaden_query": False,  # Disable query broadening - it introduces errors
         "rerank": not args.disable_rerank,
         "compress": args.enable_compress,
         "context_chunk_size": args.context_chunk_size,

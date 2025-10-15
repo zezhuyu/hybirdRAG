@@ -21,15 +21,54 @@ class GraphRAGQueryEngine(CustomQueryEngine):
             # Get all nodes quickly
             all_nodes = list(self.index.docstore.docs.values())
             
-            # Filter nodes by query relevance using simple term matching
+            # Filter nodes by query relevance using improved matching
             query_terms = query_str.lower().split()
+            # Remove common stop words for better matching, but keep question words
+            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can'}
+            # Keep important question words and terms longer than 1 character
+            query_terms = [term for term in query_terms if term not in stop_words and len(term) > 1]
+            
+            # If no terms remain after filtering, use the original query as a fallback
+            if not query_terms:
+                query_terms = [query_str.lower().strip()]
+            
             relevant_nodes = []
             
             for node in all_nodes:
                 if hasattr(node, 'text') and node.text:
                     node_text = node.text.lower()
-                    # Check if node contains any query terms
-                    if any(term in node_text for term in query_terms):
+                    
+                    # Multiple matching strategies
+                    match_score = 0
+                    
+                    # Strategy 1: Exact term matching
+                    for term in query_terms:
+                        if term in node_text:
+                            match_score += 1
+                    
+                    # Strategy 2: Partial word matching (for compound terms)
+                    for term in query_terms:
+                        if any(term in word or word in term for word in node_text.split() if len(word) > 3):
+                            match_score += 0.5
+                    
+                    # Strategy 3: Semantic similarity (simple keyword expansion)
+                    semantic_groups = {
+                        'person': ['person', 'people', 'individual', 'man', 'woman', 'human'],
+                        'place': ['place', 'location', 'city', 'country', 'state', 'region'],
+                        'time': ['time', 'year', 'date', 'period', 'era', 'century'],
+                        'event': ['event', 'incident', 'happening', 'occurrence', 'situation']
+                    }
+                    
+                    for term in query_terms:
+                        for category, related_words in semantic_groups.items():
+                            if term in related_words:
+                                for related_word in related_words:
+                                    if related_word in node_text:
+                                        match_score += 0.3
+                                        break
+                    
+                    # Accept nodes with any match
+                    if match_score > 0:
                         relevant_nodes.append(node)
         
             if len(relevant_nodes) == 0:
