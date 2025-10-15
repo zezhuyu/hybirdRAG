@@ -142,7 +142,7 @@ class VectorRAGPipeline:
         except Exception:
             return None
 
-    def query(self, query: List[str], limit: int = 10, filters: List[str] = None):
+    def query(self, query: List[str], limit: int = 20, filters: List[str] = None):  # Increased default limit
         # Handle both single query and list of queries
         if isinstance(query, str):
             query_list = [query]

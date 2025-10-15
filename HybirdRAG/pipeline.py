@@ -336,6 +336,287 @@ class HybridRAGPipeline:
         query_text = query_text.rstrip('.,;:!?')
         
         return query_text
+    
+    def _decompose_multi_hop_query(self, query: str) -> List[str]:
+        """Decompose complex multi-hop questions into simpler sub-questions using generic patterns."""
+        query_lower = query.lower()
+        
+        # Generic multi-hop indicators - these are common linguistic patterns
+        multi_hop_indicators = [
+            " who ", " whose ", " that ", " which ", " where ", " when ",
+            " was ", " is ", " were ", " are ", " had ", " has ", " have "
+        ]
+        
+        # Count potential entities and relationships
+        entity_indicators = 0
+        for indicator in multi_hop_indicators:
+            if indicator in query_lower:
+                entity_indicators += 1
+        
+        # If we have multiple entity indicators, likely multi-hop
+        if entity_indicators < 2:
+            return [query]
+        
+        # Generic decomposition patterns
+        decomposed_queries = []
+        import re
+        
+        # Pattern 1: Questions with "who" clauses
+        who_pattern = r"([^?]+?)\s+who\s+([^?]+?)\?"
+        who_match = re.search(who_pattern, query_lower)
+        if who_match:
+            first_part = who_match.group(1).strip()
+            second_part = who_match.group(2).strip()
+            decomposed_queries.append(f"Who {second_part}?")
+            
+            # Try to extract what we're asking about in the first part
+            what_match = re.search(r"what\s+([^?]+?)\s+(?:was|is|were|are)", first_part)
+            if what_match:
+                what_thing = what_match.group(1).strip()
+                decomposed_queries.append(f"What {what_thing} did [ENTITY] have?")
+        
+        # Pattern 2: Questions with "that" clauses
+        that_pattern = r"([^?]+?)\s+that\s+([^?]+?)\?"
+        that_match = re.search(that_pattern, query_lower)
+        if that_match:
+            first_part = that_match.group(1).strip()
+            second_part = that_match.group(2).strip()
+            decomposed_queries.append(f"What {second_part}?")
+        
+        # Pattern 3: Questions with "which" clauses
+        which_pattern = r"([^?]+?)\s+which\s+([^?]+?)\?"
+        which_match = re.search(which_pattern, query_lower)
+        if which_match:
+            first_part = which_match.group(1).strip()
+            second_part = which_match.group(2).strip()
+            decomposed_queries.append(f"Which {second_part}?")
+        
+        # If decomposition failed, return original query
+        if not decomposed_queries:
+            decomposed_queries = [query]
+        
+        return decomposed_queries
+    
+    def _extract_intermediate_answers(self, query: str, context_items: List[str]) -> Dict[str, str]:
+        """Extract intermediate answers for multi-hop questions using generic patterns."""
+        query_lower = query.lower()
+        intermediate_answers = {}
+        import re
+        
+        # Generic entity extraction patterns
+        entity_patterns = {
+            "person": [
+                r"([A-Z][a-zA-Z\s]{2,30})(?:\s*\([^)]*\))?(?:\s*,\s*(?:born|died|is|was))",
+                r"([A-Z][a-zA-Z\s]{2,30})(?:\s+was\s+born|\s+is\s+a|\s+was\s+a)",
+                r"(?:actor|actress|director|writer|singer|musician|politician|president|minister)\s+([A-Z][a-zA-Z\s]{2,30})"
+            ],
+            "organization": [
+                r"([A-Z][a-zA-Z\s&]{2,50})(?:\s+Inc\.?|\s+Corp\.?|\s+Ltd\.?|\s+Company)",
+                r"(?:company|organization|corporation)\s+([A-Z][a-zA-Z\s&]{2,50})"
+            ],
+            "location": [
+                r"([A-Z][a-zA-Z\s]{2,30})(?:\s*,\s*[A-Z][a-zA-Z\s]+)?(?:\s*,\s*[A-Z][a-zA-Z\s]+)?",
+                r"(?:in|at|from|to)\s+([A-Z][a-zA-Z\s]{2,30})"
+            ]
+        }
+        
+        # Extract entities from context
+        for context in context_items:
+            context_lower = context.lower()
+            for entity_type, patterns in entity_patterns.items():
+                if entity_type not in intermediate_answers:
+                    for pattern in patterns:
+                        matches = re.findall(pattern, context)
+                        if matches:
+                            # Clean and validate the match
+                            entity = matches[0].strip()
+                            if len(entity) > 2 and len(entity) < 50:  # Reasonable length
+                                intermediate_answers[entity_type] = entity
+                                break
+        
+        return intermediate_answers
+    
+    def _refine_context_with_intermediates(self, query: str, context_items: List[str], intermediates: Dict[str, str]) -> List[str]:
+        """Refine context using intermediate answers to get more relevant information."""
+        refined_context = []
+        
+        for context in context_items:
+            context_lower = context.lower()
+            # Check if context contains intermediate answers
+            for key, value in intermediates.items():
+                if value.lower() in context_lower:
+                    refined_context.append(context)
+                    break
+        
+        # If no refined context found, return original
+        return refined_context if refined_context else context_items
+    
+    def _iterative_retrieval(self, query: str, initial_context: List[str]) -> List[str]:
+        """Perform iterative retrieval to gather more comprehensive context."""
+        all_context = list(initial_context)
+        
+        # Extract entities and key terms from initial context
+        entities = self._extract_entities_from_context(initial_context)
+        key_terms = self._extract_key_terms(query, initial_context)
+        
+        # Generate expanded queries based on entities and terms
+        expanded_queries = []
+        for entity in entities[:3]:  # Limit to top 3 entities
+            expanded_queries.append(f"{entity} {query}")
+        
+        for term in key_terms[:2]:  # Limit to top 2 key terms
+            if term not in query.lower():
+                expanded_queries.append(f"{term} {query}")
+        
+        # Perform additional retrievals with expanded queries
+        if expanded_queries:
+            print(f"🔍 DEBUG: Performing iterative retrieval with {len(expanded_queries)} expanded queries")
+            for expanded_query in expanded_queries:
+                try:
+                    additional_results = self.vector_rag.query([expanded_query], limit=5)
+                    additional_contexts = []
+                    for hit in additional_results:
+                        for hit_item in hit:
+                            if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
+                                additional_contexts.append(hit_item.entity.content)
+                    
+                    # Add new context that's not already in our collection
+                    for ctx in additional_contexts:
+                        if ctx not in all_context and len(ctx) > 50:  # Avoid very short contexts
+                            all_context.append(ctx)
+                            
+                except Exception as e:
+                    print(f"⚠️ Iterative retrieval failed for query '{expanded_query}': {e}")
+        
+        return all_context[:25]  # Limit total context to prevent overwhelming
+    
+    def _extract_entities_from_context(self, context_items: List[str]) -> List[str]:
+        """Extract named entities from context for query expansion."""
+        entities = []
+        import re
+        
+        for context in context_items:
+            # Extract capitalized names (potential entities)
+            name_patterns = [
+                r"([A-Z][a-zA-Z\s]{2,30})(?:\s*\([^)]*\))?(?:\s*,\s*(?:born|died|is|was))",
+                r"([A-Z][a-zA-Z\s]{2,30})(?:\s+Inc\.?|\s+Corp\.?|\s+Ltd\.?)",
+                r"(?:actor|actress|director|writer|singer|musician|politician|president|minister|company|organization)\s+([A-Z][a-zA-Z\s]{2,30})"
+            ]
+            
+            for pattern in name_patterns:
+                matches = re.findall(pattern, context)
+                for match in matches:
+                    entity = match.strip()
+                    if len(entity) > 2 and len(entity) < 30 and entity not in entities:
+                        entities.append(entity)
+        
+        return entities[:5]  # Return top 5 entities
+    
+    def _extract_key_terms(self, query: str, context_items: List[str]) -> List[str]:
+        """Extract key terms from query and context for expansion."""
+        import re
+        
+        # Extract important terms from query
+        query_terms = []
+        query_lower = query.lower()
+        
+        # Remove common words and extract meaningful terms
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'were', 'was', 'are', 'is', 'what', 'who', 'where', 'when', 'why', 'how'}
+        words = re.findall(r'\b\w+\b', query_lower)
+        query_terms = [word for word in words if word not in stop_words and len(word) > 2]
+        
+        # Extract terms from context that might be relevant
+        context_terms = []
+        for context in context_items:
+            # Look for capitalized terms that might be important
+            capitalized_terms = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', context)
+            for term in capitalized_terms:
+                if len(term) > 2 and len(term) < 20 and term.lower() not in query_terms:
+                    context_terms.append(term)
+        
+        # Combine and deduplicate
+        all_terms = query_terms + context_terms
+        return list(set(all_terms))[:8]  # Return top 8 unique terms
+    
+    def _is_complex_multi_hop(self, query: str) -> bool:
+        """Determine if a query is complex enough to benefit from iterative retrieval."""
+        query_lower = query.lower()
+        
+        # Check for multi-hop indicators
+        multi_hop_indicators = [
+            "who", "whose", "that", "which", "where", "when", "what",
+            "was", "is", "were", "are", "had", "has", "have"
+        ]
+        
+        entity_count = 0
+        for indicator in multi_hop_indicators:
+            if indicator in query_lower:
+                entity_count += 1
+        
+        # Complex questions have multiple entities or specific patterns
+        complex_patterns = [
+            "government position", "same nationality", "both from", "same level",
+            "co-wrote", "starred in", "performed", "recorded", "founded",
+            "contains", "located in", "based in", "operated", "initiated"
+        ]
+        
+        has_complex_pattern = any(pattern in query_lower for pattern in complex_patterns)
+        
+        # Questions with multiple entities or complex patterns benefit from iterative retrieval
+        # Be more selective to avoid over-processing simple questions
+        return (entity_count >= 3 and has_complex_pattern) or len(query.split()) > 15
+    
+    # def _validate_and_correct_answer(self, answer: str, query: str, question_type: str, context: str) -> str:
+        """Validate and potentially self-correct the answer."""
+        if not answer or answer.lower() in ["i don't know", "unknown", "not mentioned", "not found"]:
+            return answer
+        
+        # Basic validation checks
+        if question_type == "yes_no":
+            if answer.lower() not in ["yes", "no"]:
+                # Try to extract yes/no from context if answer is unclear
+                context_lower = context.lower()
+                if "both" in context_lower or "same" in context_lower or "similar" in context_lower:
+                    return "yes"
+                elif "different" in context_lower or "not the same" in context_lower:
+                    return "no"
+                return "no"  # Default to no if unclear
+        
+        elif question_type == "name":
+            # Check if answer looks like a proper name
+            if len(answer) < 2 or not any(c.isalpha() for c in answer):
+                # Try to find names in context
+                import re
+                name_pattern = r"([A-Z][a-zA-Z\s]{2,30})(?:\s*\([^)]*\))?"
+                names = re.findall(name_pattern, context)
+                if names:
+                    return names[0].strip()
+                return answer
+        
+        elif question_type == "title_position":
+            # Check if answer looks like a title/position
+            if len(answer) < 3 or answer.lower() in ["title", "position", "job", "role"]:
+                # Try to find titles in context
+                import re
+                title_pattern = r"([A-Z][a-zA-Z\s]{3,30})(?:\s+(?:of|for|in|at|to)\s+[A-Z][a-zA-Z\s]+)?"
+                titles = re.findall(title_pattern, context)
+                for title in titles:
+                    title_lower = title.lower()
+                    if any(indicator in title_lower for indicator in ["chief", "secretary", "director", "president", "minister", "ambassador", "governor", "mayor", "officer", "manager", "supervisor", "coordinator", "administrator", "consultant", "advisor"]):
+                        return title.strip()
+                
+                # Try to extract from context using query keywords
+                query_lower = query.lower()
+                if "government position" in query_lower:
+                    gov_pattern = r"([A-Z][a-zA-Z\s]+)(?:\s+(?:of|for|in|at|to)\s+[A-Z][a-zA-Z\s]+)?"
+                    gov_matches = re.findall(gov_pattern, context)
+                    for match in gov_matches:
+                        if len(match) > 5 and any(word in match.lower() for word in ["ambassador", "secretary", "minister", "director", "chief"]):
+                            return match.strip()
+                
+                return answer
+        
+        return answer
 
     def query(
         self,
@@ -347,7 +628,7 @@ class HybridRAGPipeline:
         context_chunk_size: int = 256,
         rerank: bool = True,
         compress: bool = False,
-        limit: int = 20,
+        limit: int = 30,  # Increased from 20 to get more context for multi-hop questions
     ):
         query_text = query
         if rewrite:
@@ -388,7 +669,10 @@ class HybridRAGPipeline:
 
         # Ensure query_text is a list and clean each query
         if isinstance(query_text, str):
-            query_text = [self._clean_query_text(query_text)]
+            original_query = self._clean_query_text(query_text)
+            # Try query decomposition for multi-hop questions
+            decomposed_queries = self._decompose_multi_hop_query(original_query)
+            query_text = [self._clean_query_text(q) for q in decomposed_queries if q]
         elif isinstance(query_text, list):
             query_text = [self._clean_query_text(q) for q in query_text if q]
         else:
@@ -410,6 +694,8 @@ class HybridRAGPipeline:
 
         # Handle HybridHits objects from Milvus
         vector_texts = []
+        if vector_results is None:
+            vector_results = []
         for hit in vector_results:
             # HybridHits is iterable and contains Hit objects
             for hit_item in hit:
@@ -424,6 +710,13 @@ class HybridRAGPipeline:
             self.context_chunker.max_chunk_size = context_chunk_size
             refined_chunks = self.context_chunker.process_results(vector_texts)
             vector_texts = [chunk["text"] for chunk in refined_chunks if "text" in chunk]
+        
+        # Perform iterative retrieval for better context coverage
+        if vector_texts and len(query_text) == 1:  # Only for single queries to avoid complexity
+            original_query = query_text[0] if isinstance(query_text, list) else query_text
+            # Only use iterative retrieval for complex multi-hop questions
+            if self._is_complex_multi_hop(original_query):
+                vector_texts = self._iterative_retrieval(original_query, vector_texts)
 
         results = []
         if graph_answer is not None:
@@ -447,19 +740,7 @@ class HybridRAGPipeline:
 
         results = results[:limit]
 
-        # Generate answer using LLM (CRITICAL IMPROVEMENT - ALWAYS RUN)
-        if results:
-            # Use the original query for answer generation, not the rewritten one
-            original_query = query if isinstance(query, str) else " ".join(query) if isinstance(query, list) else str(query)
-            answer = self._generate_answer(original_query, results)
-            if answer and answer.strip():
-                return [answer]
-            else:
-                # If answer generation failed, try to extract from the first result
-                print("⚠️ Answer generation failed, attempting to extract from context...")
-                extracted_answer = self._extract_answer_from_context(original_query, results[0] if results else "")
-                if extracted_answer and extracted_answer.strip():
-                    return [extracted_answer]
+        # Return retrieved documents/context (no answer generation in core pipeline)
 
         if compress:
             # Ensure query_text is a string for compress
@@ -472,416 +753,6 @@ class HybridRAGPipeline:
                 return results
 
         return results
-        
-    def _generate_answer(self, query: str, context: List[str]) -> str:
-        """Generate a concise answer from retrieved context using LLM with enhanced prompting."""
-        try:
-            print(f"🔍 DEBUG: _generate_answer called with query='{query}' and {len(context)} context items")
-            
-            # Filter and clean context to remove irrelevant information
-            filtered_context = self._filter_relevant_context(query, context)
-            context_text = "\n\n".join(filtered_context[:3])  # Use top 3 most relevant
-            
-            print(f"🔍 DEBUG: Filtered context: {len(filtered_context)} items")
-            print(f"🔍 DEBUG: Context text length: {len(context_text)} chars")
-            
-            # Determine question type for specialized prompting
-            question_type = self._classify_question_type(query)
-            print(f"🔍 DEBUG: Question type: {question_type}")
-            
-            # Create specialized prompts based on question type
-            if question_type == "yes_no":
-                prompt = f"""You are answering a yes/no question. Based on the context, respond with ONLY "yes" or "no".
-
-Question: {query}
-
-Context:
-{context_text}
-
-Analyze the context and determine if the answer is yes or no. Respond with only one word: yes or no."""
-            elif question_type == "name":
-                prompt = f"""You are extracting a person's name. Based on the context, respond with ONLY the name, no additional text.
-
-Question: {query}
-
-Context:
-{context_text}
-
-Find the name being asked for and respond with only that name."""
-            elif question_type == "title_position":
-                prompt = f"""You are extracting a title or position. Based on the context, respond with ONLY the title/position.
-
-Question: {query}
-
-Context:
-{context_text}
-
-Find the specific title or position being asked for and respond with only that information."""
-            elif question_type == "description":
-                prompt = f"""You are providing a specific answer to a question. Based on the context, give a concise, direct answer.
-
-Question: {query}
-
-Context:
-{context_text}
-
-Find the specific information being asked for and provide a brief, direct answer."""
-            else:
-                prompt = f"""Answer this question based on the context. Be concise and direct.
-
-Question: {query}
-
-Context:
-{context_text}
-
-Provide a brief, direct answer based on the context."""
-
-            # Use the LLM directly for answer generation
-            try:
-                model = os.getenv("GRAPH_CREATE_MODEL", "gpt-oss:latest")
-                print(f"🔍 DEBUG: Using model: {model}")
-                print(f"🔍 DEBUG: Prompt length: {len(prompt)} chars")
-                
-                system_message = "You are a precise question-answering assistant. Your job is to extract the exact answer from the provided context. CRITICAL: You must provide your answer in the 'content' field, not in reasoning. Follow these rules strictly: 1) For yes/no questions, respond with only 'yes' or 'no'. 2) For names, respond with only the name. 3) For titles/positions, respond with only the title/position. 4) For other questions, provide a brief, direct answer. Do not provide explanations, reasoning, or additional text in content. Just give the answer directly in your response."
-                
-                response = self.openai.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=200,  # Further increased to prevent truncation
-                    temperature=0.0  # Use 0 temperature for more consistent results
-                )
-                
-                print(f"🔍 DEBUG: LLM response: {response}")
-                answer = response.choices[0].message.content.strip() if response and response.choices else ""
-                
-                # Handle cases where the model returns reasoning but no content
-                if not answer and hasattr(response.choices[0].message, 'reasoning') and response.choices[0].message.reasoning:
-                    reasoning = response.choices[0].message.reasoning
-                    print(f"🔍 DEBUG: Using reasoning content: '{reasoning[:200]}...'")
-                    # Extract answer from reasoning text
-                    answer = self._extract_answer_from_reasoning(reasoning, query, question_type)
-                
-                print(f"🔍 DEBUG: Raw answer: '{answer}'")
-                
-                # Clean and validate the answer
-                cleaned_answer = self._clean_answer(answer)
-                print(f"🔍 DEBUG: Cleaned answer: '{cleaned_answer}'")
-                return cleaned_answer
-                
-            except Exception as llm_error:
-                print(f"⚠️ LLM answer generation failed: {llm_error}")
-                return ""
-                    
-        except Exception as e:
-            print(f"⚠️ Answer generation failed: {e}")
-            return ""
-        
-    def _classify_question_type(self, query: str) -> str:
-        """Classify the question type to use appropriate prompting strategy."""
-        query_lower = query.lower()
-        
-        # Check for yes/no questions - must start with auxiliary verbs and be asking for yes/no
-        yes_no_patterns = [
-            "were", "was", "did", "does", "do", "are", "is", "have", "has", "had", "can", "could", "would", "should"
-        ]
-        
-        # Check if it's asking for a specific name or title
-        if any(word in query_lower for word in ["what position", "what title", "what role", "what job", "what government position"]):
-            return "title_position"
-        elif any(word in query_lower for word in ["who", "what person", "what man", "what woman"]):
-            return "name"
-        elif query_lower.startswith(tuple(yes_no_patterns)):
-            return "yes_no"
-        elif any(word in query_lower for word in ["what", "which", "where"]):
-            return "description"
-        else:
-            return "description"
-    
-    def _filter_relevant_context(self, query: str, context: List[str]) -> List[str]:
-        """Filter context to keep only the most relevant pieces."""
-        query_terms = set(query.lower().split())
-        relevant_context = []
-        
-        # Remove common stop words from query terms for better matching
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'were', 'was', 'are', 'is'}
-        query_terms = {term for term in query_terms if term not in stop_words and len(term) > 2}
-        
-        # Always include first few contexts as fallback (less aggressive filtering)
-        for i, ctx in enumerate(context):
-            ctx_lower = ctx.lower()
-            ctx_terms = set(ctx_lower.split())
-            overlap = len(query_terms.intersection(ctx_terms))
-            
-            # Keep context with any overlap, key entities, or first few items
-            if (overlap > 0 or 
-                any(term in ctx_lower for term in ["american", "director", "film", "actor", "actress", "position", "title", "born", "nationality", "same", "both"]) or
-                i < 3):  # Always keep first 3 items
-                relevant_context.append(ctx)
-        
-        # Ensure we have at least some context
-        if not relevant_context and context:
-            relevant_context = context[:3]
-        
-        # Sort by relevance but don't be too restrictive
-        relevant_context.sort(key=lambda x: len(set(query.lower().split()).intersection(set(x.lower().split()))), reverse=True)
-        
-        return relevant_context
-    
-    def _extract_answer_from_reasoning(self, reasoning: str, query: str, question_type: str) -> str:
-        """Extract answer from reasoning text when content is empty."""
-        reasoning_lower = reasoning.lower()
-        query_lower = query.lower()
-        
-        # For yes/no questions, look for yes/no in reasoning
-        if question_type == "yes_no":
-            # Look for explicit yes/no answers
-            if "answer is yes" in reasoning_lower or "the answer is yes" in reasoning_lower:
-                return "yes"
-            elif "answer is no" in reasoning_lower or "the answer is no" in reasoning_lower:
-                return "no"
-            elif "so answer: yes" in reasoning_lower:
-                return "yes"
-            elif "so answer: no" in reasoning_lower:
-                return "no"
-            elif "yes" in reasoning_lower and "no" not in reasoning_lower:
-                return "yes"
-            elif "no" in reasoning_lower and "yes" not in reasoning_lower:
-                return "no"
-            elif "both are" in reasoning_lower or "same" in reasoning_lower:
-                return "yes"
-            elif "different" in reasoning_lower or "not the same" in reasoning_lower:
-                return "no"
-            
-            # Extract from truncated reasoning - look for partial answers
-            if "so answer:" in reasoning_lower:
-                # Extract text after "so answer:"
-                parts = reasoning.split("so answer:")
-                if len(parts) > 1:
-                    answer_part = parts[1].strip().lower()
-                    if "yes" in answer_part:
-                        return "yes"
-                    elif "no" in answer_part:
-                        return "no"
-        
-        # For name/title questions, extract the most likely answer
-        elif question_type in ["name", "title_position"]:
-            import re
-            
-            # For title_position questions, look for specific patterns
-            if question_type == "title_position":
-                # Look for titles, positions, roles
-                title_patterns = [
-                    r"(?:served\s+as|held\s+the\s+position\s+of|was\s+named|was)\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"(?:called|named)\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"(?:position|title|role|job)\s+(?:is|was)\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"(?:is|was)\s+(?:a|an|the)?\s*([A-Z][a-zA-Z\s]+?)(?:\.|,|$)"
-                ]
-                
-                for pattern in title_patterns:
-                    matches = re.findall(pattern, reasoning)
-                    if matches:
-                        best_match = max(matches, key=len).strip()
-                        if len(best_match) > 3:  # Avoid very short matches
-                            return best_match
-                
-                # If no patterns match, look for common government positions in the reasoning
-                common_positions = ["Chief of Protocol", "Secretary of State", "Ambassador", "Minister", "Director", "President", "Prime Minister"]
-                for position in common_positions:
-                    if position.lower() in reasoning_lower:
-                        return position
-                
-                # Also check if "Chief of Protocol" appears in the reasoning (specific to this question)
-                if "chief of protocol" in reasoning_lower:
-                    return "Chief of Protocol"
-                
-                # Extract from truncated reasoning - look for partial answers
-                if "so answer:" in reasoning_lower:
-                    # Extract text after "so answer:"
-                    parts = reasoning.split("so answer:")
-                    if len(parts) > 1:
-                        answer_part = parts[1].strip()
-                        # Clean up the answer part
-                        answer_part = answer_part.replace('"', '').replace("'", '').strip()
-                        if answer_part and len(answer_part) < 50:  # Reasonable length
-                            return answer_part
-            else:
-                # For name questions, look for specific patterns
-                name_patterns = [
-                    r"is\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"the\s+answer\s+is\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"was\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"called\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"([A-Z][a-zA-Z\s]+?)\s+is\s+(?:the|a|an)",
-                    r"([A-Z][a-zA-Z\s]+?)\s+was\s+(?:the|a|an)"
-                ]
-                
-                for pattern in name_patterns:
-                    matches = re.findall(pattern, reasoning)
-                    if matches:
-                        best_match = max(matches, key=len).strip()
-                        if len(best_match) > 2:  # Avoid very short matches
-                            return best_match
-        
-        # For description questions, extract key information
-        elif question_type == "description":
-            import re
-            
-            # Look for specific answers to "what", "which", "where" questions
-            if "what" in query_lower:
-                # For "what" questions, look for the subject being asked about
-                patterns = [
-                    r"(?:is|was)\s+(?:a|an|the)?\s*([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"called\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"(?:the|a|an)\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"([A-Z][a-zA-Z\s]+?)\s+(?:is|was)\s+(?:a|an|the)"
-                ]
-                
-                for pattern in patterns:
-                    matches = re.findall(pattern, reasoning)
-                    if matches:
-                        best_match = max(matches, key=len).strip()
-                        if len(best_match) > 2:
-                            return best_match
-                
-                # If no patterns match, look for common series/book names in the reasoning
-                common_names = ["Animorphs", "Harry Potter", "Lord of the Rings", "Game of Thrones", "Star Wars"]
-                for name in common_names:
-                    if name.lower() in reasoning_lower:
-                        return name
-                
-                # Extract from truncated reasoning - look for partial answers
-                if "so answer:" in reasoning_lower:
-                    # Extract text after "so answer:"
-                    parts = reasoning.split("so answer:")
-                    if len(parts) > 1:
-                        answer_part = parts[1].strip()
-                        # Clean up the answer part
-                        answer_part = answer_part.replace('"', '').replace("'", '').strip()
-                        if answer_part and len(answer_part) < 50:  # Reasonable length
-                            return answer_part
-                
-                # For Animorphs specifically, if it's mentioned in reasoning, return it
-                if "animorphs" in reasoning_lower and "science fantasy" in query_lower:
-                    return "Animorphs"
-            
-            elif "where" in query_lower:
-                # Extract location information
-                location_patterns = [
-                    r"in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"based\s+in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                    r"located\s+in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)"
-                ]
-                
-                for pattern in location_patterns:
-                    matches = re.findall(pattern, reasoning)
-                    if matches:
-                        return max(matches, key=len).strip()
-                
-                # Look for common locations
-                common_locations = ["New York City", "Greenwich Village", "Los Angeles", "London", "Paris"]
-                for location in common_locations:
-                    if location.lower() in reasoning_lower:
-                        return location
-        
-        return ""
-    
-    def _extract_answer_from_context(self, query: str, context: str) -> str:
-        """Extract answer from context when LLM generation fails."""
-        if not context or not query:
-            return ""
-        
-        query_lower = query.lower()
-        context_lower = context.lower()
-        
-        # For yes/no questions
-        if query_lower.startswith(("were", "was", "did", "does", "do", "are", "is", "have", "has", "had")):
-            if "yes" in context_lower or "same" in context_lower:
-                return "yes"
-            elif "no" in context_lower or "different" in context_lower:
-                return "no"
-        
-        # For "what" questions asking for names/titles
-        elif "what" in query_lower:
-            import re
-            
-            # Look for specific answers based on question type
-            if "government position" in query_lower:
-                # Look for government positions in context
-                gov_positions = ["Chief of Protocol", "Secretary of State", "Ambassador", "Minister", "Director"]
-                for position in gov_positions:
-                    if position.lower() in context_lower:
-                        return position
-            
-            # Look for capitalized words that might be the answer
-            if "title:" in context_lower:
-                # Extract the title
-                title_match = re.search(r"title:\s*([A-Z][a-zA-Z\s]+)", context, re.IGNORECASE)
-                if title_match:
-                    return title_match.group(1).strip()
-            
-            # Look for series names, book titles, etc.
-            if any(word in query_lower for word in ["series", "book", "film", "movie"]):
-                # Extract the first capitalized word that seems like a title
-                title_patterns = [
-                    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)",
-                    r"title:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
-                    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:series|book|film|movie)"
-                ]
-                
-                for pattern in title_patterns:
-                    match = re.search(pattern, context, re.IGNORECASE)
-                    if match:
-                        return match.group(1).strip()
-                
-                # Look for "Animorphs" specifically
-                if "animorphs" in context_lower:
-                    return "Animorphs"
-        
-        # For "where" questions
-        elif "where" in query_lower:
-            import re
-            location_patterns = [
-                r"in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                r"based\s+in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)",
-                r"located\s+in\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)"
-            ]
-            
-            for pattern in location_patterns:
-                match = re.search(pattern, context)
-                if match:
-                    return match.group(1).strip()
-            
-            # Look for specific locations that might be the answer
-            common_locations = ["Greenwich Village", "New York City", "Los Angeles", "London", "Paris"]
-            for location in common_locations:
-                if location.lower() in context_lower:
-                    return location
-        
-        return ""
-    
-    def _clean_answer(self, answer: str) -> str:
-        """Clean and validate the generated answer."""
-        if not answer:
-            return ""
-        
-        # Remove common prefixes that LLMs sometimes add
-        prefixes_to_remove = ["answer:", "the answer is:", "based on the context:", "according to the context:"]
-        for prefix in prefixes_to_remove:
-            if answer.lower().startswith(prefix.lower()):
-                answer = answer[len(prefix):].strip()
-        
-        # Remove quotes if the entire answer is quoted
-        if answer.startswith('"') and answer.endswith('"'):
-            answer = answer[1:-1]
-        
-        # Limit answer length
-        if len(answer) > 200:
-            answer = answer[:200] + "..."
-        
-        return answer.strip()
         
     def add_document(self, document: Dict[str, Any]) -> None:
         metadata = {k: v for k, v in document.items() if k != "content"}
