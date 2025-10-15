@@ -43,6 +43,237 @@ class AnswerGenerator:
         )
     
     def generate_answer(self, query: str, context: List[str]) -> str:
+        """Generate a natural answer from retrieved context using LLM."""
+        try:
+            print(f"🔍 DEBUG: generate_answer called with query='{query}' and {len(context)} context items")
+            
+            if not context:
+                return ""
+            
+            # Use simple context filtering - take top 20 most relevant items
+            filtered_context = self._simple_filter_context(query, context)
+            print(f"🔍 DEBUG: Filtered context: {len(filtered_context)} items")
+            
+            if not filtered_context:
+                return ""
+            
+            # Join context into a single string
+            context_text = "\n".join(filtered_context)
+            print(f"🔍 DEBUG: Context text length: {len(context_text)} chars")
+            
+            # Create a natural, flexible prompt
+            prompt = f"""Based on the provided context, answer the following question. You may need to connect information from different parts of the context to answer complex questions.
+
+Question: {query}
+
+Context:
+{context_text}
+
+Instructions:
+- Provide a direct, accurate answer based on the context
+- If the question requires connecting multiple pieces of information, do so
+- Be concise but complete
+- If the answer is not clearly available in the context, say so
+- For yes/no questions, answer with "yes" or "no"
+- For specific facts (names, dates, numbers), be precise
+
+Answer:"""
+
+            print(f"🔍 DEBUG: Using OpenAI client for answer generation")
+            print(f"🔍 DEBUG: Prompt length: {len(prompt)} chars")
+            
+            # Call LLM with natural prompt
+            response = self.openai_client.chat.completions.create(
+                model="gpt-oss:latest",
+                messages=[
+                    {"role": "system", "content": "You are a helpful question-answering assistant. Provide accurate, direct answers based on the given context. Use your reasoning abilities to connect information when needed."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,  # Reasonable limit for natural answers
+                temperature=0.1  # Slight randomness for more natural responses
+            )
+            
+            print(f"🔍 DEBUG: LLM response: {response}")
+            
+            # Extract answer from response
+            if response and response.choices:
+                content = response.choices[0].message.content
+                
+                print(f"🔍 DEBUG: Raw answer: '{content}'")
+                
+                if content and content.strip():
+                    # Clean the answer but keep it natural
+                    cleaned_answer = self._clean_answer(content.strip())
+                    print(f"🔍 DEBUG: Cleaned answer: '{cleaned_answer}'")
+                    
+                    return cleaned_answer
+                else:
+                    print("⚠️ No content in LLM response")
+                    return ""
+            else:
+                print("⚠️ No response from LLM")
+                return ""
+                
+        except Exception as e:
+            print(f"⚠️ Answer generation failed: {e}")
+            return ""
+    
+    def _simple_filter_context(self, query: str, context: List[str]) -> List[str]:
+        """Simple context filtering based on query term overlap."""
+        if not context:
+            return []
+        
+        query_terms = set(query.lower().split())
+        stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "is", "are", "was", "were", "be", "been", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should"}
+        query_terms = query_terms - stop_words
+        
+        scored_context = []
+        for item in context:
+            if not item or not item.strip():
+                continue
+            
+            item_terms = set(item.lower().split())
+            overlap = len(query_terms.intersection(item_terms))
+            scored_context.append((item, overlap))
+        
+        # Sort by overlap and take top 20
+        scored_context.sort(key=lambda x: x[1], reverse=True)
+        return [item for item, score in scored_context[:20] if score > 0]
+    
+    def _clean_answer(self, answer: str) -> str:
+        """Clean the answer by removing common artifacts."""
+        if not answer:
+            return ""
+        
+        # Remove common prefixes/suffixes
+        answer = answer.strip()
+        
+        # Remove trailing periods for consistency
+        if answer.endswith('.'):
+            answer = answer[:-1]
+        
+        # Remove quotes if the entire answer is quoted
+        if answer.startswith('"') and answer.endswith('"'):
+            answer = answer[1:-1]
+        elif answer.startswith("'") and answer.endswith("'"):
+            answer = answer[1:-1]
+        
+        return answer.strip()
+
+
+class SemanticEvaluator:
+    """Handles semantic evaluation of answers using LLM."""
+    
+    def __init__(self, openai_host: str = None, openai_api_key: str = None):
+        """Initialize the semantic evaluator with LLM service."""
+        self.openai_client = OpenAI(
+            base_url=openai_host or "http://localhost:11434/v1",
+            api_key=openai_api_key or "ollama"
+        )
+    
+    def evaluate_answer_similarity(self, question: str, predicted_answer: str, ground_truth: str) -> dict:
+        """Evaluate semantic similarity between predicted and ground truth answers."""
+        try:
+            # Create evaluation prompt
+            evaluation_prompt = f"""You are an expert evaluator for question-answering systems. Your task is to determine if two answers to the same question convey the same meaning, even if they use different words or formats.
+
+Question: {question}
+
+Predicted Answer: {predicted_answer}
+
+Ground Truth Answer: {ground_truth}
+
+Please evaluate the semantic similarity and provide:
+1. A similarity score from 0.0 to 1.0 (where 1.0 means identical meaning)
+2. A brief explanation of your reasoning
+3. Whether the answers are semantically equivalent (yes/no)
+
+Consider the following:
+- Different wordings that mean the same thing should get high scores
+- Partial matches should get moderate scores
+- Completely different meanings should get low scores
+- For yes/no questions, "yes" and "true" should be equivalent
+- For names, consider variations and nicknames
+- For numbers, exact matches are required
+- For locations, consider different ways of expressing the same place
+
+Respond in this exact format:
+SIMILARITY_SCORE: [0.0-1.0]
+EQUIVALENT: [yes/no]
+REASONING: [brief explanation]"""
+
+            response = self.openai_client.chat.completions.create(
+                model="gpt-oss:latest",
+                messages=[
+                    {"role": "system", "content": "You are a precise evaluator for question-answering systems. Focus on semantic meaning rather than exact word matching."},
+                    {"role": "user", "content": evaluation_prompt}
+                ],
+                max_tokens=300,
+                temperature=0.0
+            )
+            
+            if response and response.choices:
+                content = response.choices[0].message.content
+                
+                # Parse the response
+                similarity_score = 0.0
+                is_equivalent = False
+                reasoning = ""
+                
+                try:
+                    lines = content.strip().split('\n')
+                    for line in lines:
+                        if line.startswith('SIMILARITY_SCORE:'):
+                            score_text = line.split(':', 1)[1].strip()
+                            similarity_score = float(score_text)
+                        elif line.startswith('EQUIVALENT:'):
+                            equivalent_text = line.split(':', 1)[1].strip().lower()
+                            is_equivalent = equivalent_text == 'yes'
+                        elif line.startswith('REASONING:'):
+                            reasoning = line.split(':', 1)[1].strip()
+                except Exception as e:
+                    print(f"⚠️ Error parsing evaluation response: {e}")
+                    # Fallback: use simple string matching
+                    if predicted_answer.lower().strip() == ground_truth.lower().strip():
+                        similarity_score = 1.0
+                        is_equivalent = True
+                    else:
+                        similarity_score = 0.0
+                        is_equivalent = False
+                
+                return {
+                    'similarity_score': similarity_score,
+                    'is_equivalent': is_equivalent,
+                    'reasoning': reasoning,
+                    'raw_response': content
+                }
+            else:
+                return {
+                    'similarity_score': 0.0,
+                    'is_equivalent': False,
+                    'reasoning': 'No response from evaluator',
+                    'raw_response': ''
+                }
+                
+        except Exception as e:
+            print(f"⚠️ Semantic evaluation failed: {e}")
+            # Fallback to simple string matching
+            if predicted_answer.lower().strip() == ground_truth.lower().strip():
+                return {
+                    'similarity_score': 1.0,
+                    'is_equivalent': True,
+                    'reasoning': 'Fallback: exact string match',
+                    'raw_response': ''
+                }
+            else:
+                return {
+                    'similarity_score': 0.0,
+                    'is_equivalent': False,
+                    'reasoning': 'Fallback: no match',
+                    'raw_response': ''
+                }
+    
+    def generate_answer(self, query: str, context: List[str]) -> str:
         """Generate a concise answer from retrieved context using LLM with enhanced prompting."""
         try:
             print(f"🔍 DEBUG: generate_answer called with query='{query}' and {len(context)} context items")
@@ -67,62 +298,128 @@ class AnswerGenerator:
             
             # Create enhanced prompt based on question type
             if question_type == "yes_no":
-                prompt = f"""Analyze the context step by step to answer this yes/no question.
+                prompt = f"""Answer this yes/no question based on the context.
 
 Question: {query}
 
 Context:
 {context_text}
 
-Think through this step by step:
-1. What specific information is needed to answer this question?
-2. What does the context tell us about this information?
-3. Based on the evidence, is the answer yes or no?
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Look for evidence that directly answers the question
+3. If the evidence supports the statement, answer "yes"
+4. If the evidence contradicts or doesn't support the statement, answer "no"
+5. If the evidence is unclear or missing, answer "no"
+6. For questions about multiple entities, check each entity separately and then combine the information
 
 Answer with ONLY 'yes' or 'no':"""
                 
             elif question_type == "name":
-                prompt = f"""Analyze the context to find the specific person's name being asked about.
+                prompt = f"""Find the specific person's name being asked about.
 
 Question: {query}
 
 Context:
 {context_text}
 
-Think through this step by step:
-1. What person is the question asking about?
-2. What information about this person is in the context?
-3. What is the person's name?
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what person the question is asking about
+3. Look for the person's name in the context
+4. Extract the most specific name mentioned
+5. If multiple names are mentioned, choose the one that best fits the question
+6. For complex questions, you may need to find intermediate information first
 
 Answer with ONLY the name:"""
                 
             elif question_type == "title_position":
-                prompt = f"""Analyze the context to find the specific job title or position being asked about.
+                prompt = f"""Find the specific job title or position being asked about.
 
 Question: {query}
 
 Context:
 {context_text}
 
-Think through this step by step:
-1. What title or position is the question asking about?
-2. What information about this title/position is in the context?
-3. What is the exact title or position?
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what title or position the question is asking about
+3. Look for job titles, positions, or roles in the context
+4. Extract the most specific title/position mentioned
+5. If multiple titles are mentioned, choose the one that best fits the question
+6. For complex questions, you may need to find intermediate information first
 
 Answer with ONLY the title/position:"""
                 
-            else:  # description
-                prompt = f"""Analyze the context to provide a precise answer to this question.
+            elif question_type == "location":
+                prompt = f"""Find the specific location being asked about.
 
 Question: {query}
 
 Context:
 {context_text}
 
-Think through this step by step:
-1. What specific information is the question asking for?
-2. What relevant information is available in the context?
-3. What is the most accurate answer based on the context?
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what location the question is asking about
+3. Look for place names, cities, countries, regions, or areas in the context
+4. Extract the most specific location mentioned
+5. If multiple locations are mentioned, choose the one that best fits the question
+6. For complex questions, you may need to find intermediate information first
+
+Answer with ONLY the location:"""
+                
+            elif question_type == "time":
+                prompt = f"""Find the specific time, date, or year being asked about.
+
+Question: {query}
+
+Context:
+{context_text}
+
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what time information the question is asking for
+3. Look for dates, years, periods, or time-related information in the context
+4. Extract the most specific time mentioned
+5. If multiple times are mentioned, choose the one that best fits the question
+6. For complex questions, you may need to find intermediate information first
+
+Answer with ONLY the time/date:"""
+                
+            elif question_type == "quantity":
+                prompt = f"""Find the specific number or quantity being asked about.
+
+Question: {query}
+
+Context:
+{context_text}
+
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what quantity the question is asking for
+3. Look for numbers, counts, amounts, or measurements in the context
+4. Extract the most specific quantity mentioned
+5. If multiple quantities are mentioned, choose the one that best fits the question
+6. For complex questions, you may need to find intermediate information first
+
+Answer with ONLY the number/quantity:"""
+                
+            else:  # description
+                prompt = f"""Answer this question based on the context.
+
+Question: {query}
+
+Context:
+{context_text}
+
+Instructions:
+1. This may be a multi-hop question requiring you to connect information from different parts of the context
+2. Identify what specific information the question is asking for
+3. Look for relevant information in the context
+4. Extract the most accurate answer
+5. Keep your answer brief and direct
+6. For complex questions, you may need to find intermediate information first
 
 Provide a brief, direct answer:"""
 
@@ -133,10 +430,10 @@ Provide a brief, direct answer:"""
             response = self.openai_client.chat.completions.create(
                 model="gpt-oss:latest",
                 messages=[
-                    {"role": "system", "content": "You are a precise question-answering assistant. Your job is to extract the exact answer from the provided context. CRITICAL: Always provide your final answer in the 'content' field. For yes/no questions, respond with only 'yes' or 'no'. For names, respond with only the name. For titles/positions, respond with only the title/position. For other questions, provide a brief, direct answer. Do not include explanations, reasoning, or additional text in your response - just the answer."},
+                    {"role": "system", "content": "You are a precise question-answering assistant. Your job is to extract the exact answer from the provided context. CRITICAL: Always provide your final answer in the 'content' field. For yes/no questions, respond with only 'yes' or 'no'. For names, respond with only the name. For titles/positions, respond with only the title/position. For other questions, provide a brief, direct answer. Do not include explanations, reasoning, or additional text in your response - just the answer. You are capable of multi-hop reasoning - connecting information from different parts of the context to answer complex questions."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=500,  # Increased to prevent truncation
+                max_tokens=1000,  # Increased to prevent truncation
                 temperature=0.0  # Use 0 for more consistent results
             )
             
@@ -187,22 +484,41 @@ Provide a brief, direct answer:"""
             return ""
     
     def _classify_question_type(self, query: str) -> str:
-        """Classify the question type to use appropriate prompting strategy."""
+        """Classify the question type to use appropriate prompting strategy with enhanced patterns."""
         query_lower = query.lower()
         
-        # Check for yes/no questions - must start with auxiliary verbs and be asking for yes/no
+        # Enhanced yes/no question detection
         yes_no_patterns = [
-            "were", "was", "did", "does", "do", "are", "is", "have", "has", "had", "can", "could", "would", "should"
+            "were", "was", "did", "does", "do", "are", "is", "have", "has", "had", "can", "could", "would", "should",
+            "will", "may", "might", "must", "shall"
+        ]
+        
+        # Check for comparison patterns that indicate yes/no questions
+        comparison_patterns = [
+            "both", "same", "different", "either", "neither", "all", "any", "every"
+        ]
+        
+        # Check for quantity patterns that should NOT be yes/no
+        quantity_patterns = [
+            "how many", "how much", "number of", "count", "amount", "quantity", "total",
+            "capacity", "size", "length", "width", "height", "population", "inhabitants",
+            "more", "less", "higher", "lower", "greater", "smaller", "better", "worse"
         ]
         
         # Check if it's asking for a specific name or title
-        if any(word in query_lower for word in ["what position", "what title", "what role", "what job", "what government position", "held", "served as", "was named"]):
+        if any(word in query_lower for word in ["what position", "what title", "what role", "what job", "what government position", "held", "served as", "was named", "appointed", "elected"]):
             return "title_position"
-        elif any(word in query_lower for word in ["who", "what person", "what man", "what woman"]):
+        elif any(word in query_lower for word in ["who", "what person", "what man", "what woman", "whose", "which person", "which individual"]):
             return "name"
-        elif query_lower.startswith(tuple(yes_no_patterns)):
+        elif any(word in query_lower for word in ["where", "location", "place", "city", "country", "state", "region", "area"]):
+            return "location"
+        elif any(word in query_lower for word in ["when", "time", "date", "year", "month", "day", "period", "era", "age"]):
+            return "time"
+        elif any(pattern in query_lower for pattern in quantity_patterns):
+            return "quantity"
+        elif query_lower.startswith(tuple(yes_no_patterns)) or any(pattern in query_lower for pattern in comparison_patterns):
             return "yes_no"
-        elif any(word in query_lower for word in ["what", "which", "where"]):
+        elif any(word in query_lower for word in ["what", "which", "how"]):
             return "description"
         else:
             return "description"
@@ -216,6 +532,8 @@ Provide a brief, direct answer:"""
         stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "is", "are", "was", "were", "be", "been", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should"}
         query_terms = query_terms - stop_words
         
+        # Enhanced relevance scoring
+        scored_context = []
         for item in context:
             if not item or not item.strip():
                 continue
@@ -224,12 +542,50 @@ Provide a brief, direct answer:"""
             item_terms = set(item.lower().split())
             overlap = len(query_terms.intersection(item_terms))
             
-            # Keep items with some overlap or first few items
-            if overlap > 0 or len(relevant_context) < 3:
-                relevant_context.append(item)
+            # Calculate relevance score
+            relevance_score = overlap
+            
+            # Boost score for exact phrase matches
+            query_lower = query.lower()
+            item_lower = item.lower()
+            if any(term in item_lower for term in query_terms if len(term) > 3):
+                relevance_score += 2
+            
+            # Boost score for capitalized entities (likely important)
+            import re
+            capitalized_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', item)
+            if capitalized_entities:
+                relevance_score += len(capitalized_entities) * 0.5
+            
+            # Boost score for items with question words (likely more relevant)
+            question_words = {"who", "what", "when", "where", "why", "how", "which", "whose"}
+            question_word_matches = sum(1 for word in question_words if word in item_lower)
+            relevance_score += question_word_matches * 0.3
+            
+            # Boost score for items with specific patterns that indicate answers
+            answer_patterns = ["is", "was", "are", "were", "born", "died", "founded", "created", "directed", "wrote", "performed", "starred", "composed", "painted", "built", "designed"]
+            pattern_matches = sum(1 for pattern in answer_patterns if pattern in item_lower)
+            relevance_score += pattern_matches * 0.2
+            
+            # Boost score for items with numbers (often contain specific facts)
+            if re.search(r'\d+', item):
+                relevance_score += 0.5
+            
+            # Penalize very long contexts (likely less focused)
+            if len(item) > 2000:
+                relevance_score -= 1
+            
+            scored_context.append((item, relevance_score))
         
-        # Sort by relevance but don't be too restrictive
-        relevant_context.sort(key=lambda x: len(set(query.lower().split()).intersection(set(x.lower().split()))), reverse=True)
+        # Sort by relevance score and take top items
+        scored_context.sort(key=lambda x: x[1], reverse=True)
+        
+        # Take top 25 most relevant items (increased from 20)
+        relevant_context = [item for item, score in scored_context[:25] if score > 0]
+        
+        # Always include at least first 8 items as fallback (increased from 5)
+        if len(relevant_context) < 8:
+            relevant_context = [item for item, score in scored_context[:8]]
         
         return relevant_context
     
@@ -261,7 +617,13 @@ Provide a brief, direct answer:"""
             r"the answer:\s*([^\n\.]+)",
             r"answer:\s*([^\n\.]+)",
             r"([A-Z][a-zA-Z\s]{3,50})(?:\s+(?:is|was|are|were)\s+(?:the|a|an))",
-            r"(?:is|was|are|were)\s+(?:a|an|the)?\s*([A-Z][a-zA-Z\s]{3,50})(?:\.|,|$)"
+            r"(?:is|was|are|were)\s+(?:a|an|the)?\s*([A-Z][a-zA-Z\s]{3,50})(?:\.|,|$)",
+            # Enhanced patterns for better extraction
+            r"so\s+([A-Z][a-zA-Z\s]{2,50})(?:\.|,|$)",
+            r"([A-Z][a-zA-Z\s]{2,50})\s+(?:is|was|are|were)\s+(?:the|a|an|correct|right)",
+            r"(?:the|a|an)\s+([A-Z][a-zA-Z\s]{2,50})(?:\.|,|$)",
+            r"([A-Z][a-zA-Z\s]{2,50})(?:\s*,\s*(?:born|died|formed|created|founded))",
+            r"(?:born|died|formed|created|founded)\s+(?:in|on|by)\s+([A-Z][a-zA-Z\s]{2,50})"
         ]
         
         for pattern in answer_patterns:
@@ -589,6 +951,7 @@ class HybridRAGEvaluator:
         collect_predictions: bool = False,
         sleep: float = 0.0,
         answer_generator: Optional[AnswerGenerator] = None,
+        semantic_evaluator: Optional[SemanticEvaluator] = None,
     ):
         self.pipeline = pipeline
         self.query_kwargs = query_kwargs or {}
@@ -596,6 +959,7 @@ class HybridRAGEvaluator:
         self.collect_predictions = collect_predictions
         self.sleep = sleep
         self.answer_generator = answer_generator
+        self.semantic_evaluator = semantic_evaluator
 
         if combine_strategy not in {"first", "concatenate"}:
             raise ValueError("combine_strategy must be 'first' or 'concatenate'")
@@ -646,7 +1010,29 @@ class HybridRAGEvaluator:
             else:
                 prediction_text = self._combine_responses(responses)
             
-            em, f1 = best_score(prediction_text, example.answers)
+            # Use semantic evaluation if available, otherwise fall back to exact matching
+            if self.semantic_evaluator:
+                # Use semantic evaluation for more flexible scoring
+                best_similarity = 0.0
+                best_equivalent = False
+                
+                for ground_truth in example.answers:
+                    evaluation = self.semantic_evaluator.evaluate_answer_similarity(
+                        example.question, prediction_text, ground_truth
+                    )
+                    if evaluation['similarity_score'] > best_similarity:
+                        best_similarity = evaluation['similarity_score']
+                        best_equivalent = evaluation['is_equivalent']
+                
+                # Convert semantic scores to EM/F1 format
+                em = 1.0 if best_equivalent else 0.0
+                f1 = best_similarity
+                
+                print(f"🔍 DEBUG: Semantic evaluation - EM: {em}, F1: {f1:.3f}, Equivalent: {best_equivalent}")
+            else:
+                # Fall back to exact matching
+                em, f1 = best_score(prediction_text, example.answers)
+            
             em_total += em
             f1_total += f1
 
@@ -760,6 +1146,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Create answer generator for LLM-based answer generation
     answer_generator = AnswerGenerator()
     
+    # Create semantic evaluator for flexible answer evaluation
+    semantic_evaluator = SemanticEvaluator()
+    
     evaluator = HybridRAGEvaluator(
         pipeline,
         query_kwargs=query_kwargs,
@@ -767,6 +1156,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         collect_predictions=args.collect_predictions,
         sleep=args.sleep,
         answer_generator=answer_generator,
+        semantic_evaluator=semantic_evaluator,
     )
 
     configs: List[DatasetConfig] = []

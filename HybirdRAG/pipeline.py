@@ -566,6 +566,27 @@ class HybridRAGPipeline:
         # Be more selective to avoid over-processing simple questions
         return (entity_count >= 3 and has_complex_pattern) or len(query.split()) > 15
     
+    def _has_multiple_entities(self, query: str) -> bool:
+        """Check if a query mentions multiple entities that might need iterative retrieval."""
+        query_lower = query.lower()
+        
+        # Look for patterns that suggest multiple entities
+        multi_entity_patterns = [
+            " and ", " or ", " both ", " either ", " neither ",
+            " same ", " different ", " compared to ", " versus ",
+            " who ", " that ", " which ", " where "
+        ]
+        
+        # Count capitalized words (potential entities)
+        import re
+        capitalized_words = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)
+        
+        # Check for multi-entity patterns
+        has_multi_entity_pattern = any(pattern in query_lower for pattern in multi_entity_patterns)
+        
+        # If we have multiple capitalized words or multi-entity patterns, likely multi-entity
+        return len(capitalized_words) >= 2 or has_multi_entity_pattern
+    
     # def _validate_and_correct_answer(self, answer: str, query: str, question_type: str, context: str) -> str:
         """Validate and potentially self-correct the answer."""
         if not answer or answer.lower() in ["i don't know", "unknown", "not mentioned", "not found"]:
@@ -714,8 +735,11 @@ class HybridRAGPipeline:
         # Perform iterative retrieval for better context coverage
         if vector_texts and len(query_text) == 1:  # Only for single queries to avoid complexity
             original_query = query_text[0] if isinstance(query_text, list) else query_text
-            # Only use iterative retrieval for complex multi-hop questions
+            # Use iterative retrieval for complex multi-hop questions (relaxed criteria)
             if self._is_complex_multi_hop(original_query):
+                vector_texts = self._iterative_retrieval(original_query, vector_texts)
+            # Also use iterative retrieval for questions with multiple entities
+            elif self._has_multiple_entities(original_query):
                 vector_texts = self._iterative_retrieval(original_query, vector_texts)
 
         results = []
