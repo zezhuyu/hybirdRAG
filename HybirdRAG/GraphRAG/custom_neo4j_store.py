@@ -26,6 +26,7 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         username: str,
         password: str,
         database: str = "neo4j",
+        collection_name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the Neo4j graph store.
@@ -35,11 +36,13 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
             username: Neo4j username
             password: Neo4j password
             database: Neo4j database name (default: "neo4j")
+            collection_name: Optional collection name to tag all nodes with
         """
         super().__init__()
         self._driver = GraphDatabase.driver(uri, auth=(username, password))
         self._database = database
         self._session = self._driver.session(database=database)
+        self._collection_name = collection_name  # Store collection name for tagging nodes
         
     def close(self) -> None:
         """Close the Neo4j connection."""
@@ -136,21 +139,35 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         # Sanitize the label for Neo4j (replace spaces and special chars with underscores)
         sanitized_label = self._sanitize_label(node.label)
         
-        # Create or update the node with the proper label
-        query = f"""
-        MERGE (n:{sanitized_label} {{name: $name}})
-        SET n.description = $description,
-            n.properties = $properties,
-            n.original_label = $original_label
-        """
+        # Create or update the node with the proper label and collection tag
+        if self._collection_name:
+            query = f"""
+            MERGE (n:{sanitized_label} {{name: $name}})
+            SET n.description = $description,
+                n.properties = $properties,
+                n.original_label = $original_label,
+                n.collection = $collection
+            """
+        else:
+            query = f"""
+            MERGE (n:{sanitized_label} {{name: $name}})
+            SET n.description = $description,
+                n.properties = $properties,
+                n.original_label = $original_label
+            """
+        
         properties = node.properties or {}
-        self._session.run(
-            query,
-            name=node.name,
-            description=properties.get("entity_description", ""),
-            properties=json.dumps(properties),
-            original_label=node.label  # Store original label as property
-        )
+        params = {
+            "name": node.name,
+            "description": properties.get("entity_description", ""),
+            "properties": json.dumps(properties),
+            "original_label": node.label  # Store original label as property
+        }
+        
+        if self._collection_name:
+            params["collection"] = self._collection_name
+        
+        self._session.run(query, **params)
     
     def _sanitize_label(self, label: str) -> str:
         """Sanitize label for Neo4j compatibility."""

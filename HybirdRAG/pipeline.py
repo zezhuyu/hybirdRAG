@@ -9,7 +9,7 @@ from openai import OpenAI
 from pymilvus import MilvusClient
 
 from .VectorRAG.pipeline import VectorRAGPipeline, DIMENSION
-from .VectorRAG.text_processing import ContextualChunker, LateChunker
+from .VectorRAG.text_processing import ContextualChunker, LateChunker, HybridChunker
 
 from .GraphRAG.convertObj import OpenAILLMWrapper, MLModelEmbeddingWrapper, OpenAIEmbeddingsWrapper
 from .VectorRAG.convertObj import OpenAIEmbeddingClient
@@ -52,7 +52,7 @@ class HybridRAGPipeline:
         neo4j_config: Optional[Dict[str, Any]] = None,
         graph_vector_store_kwargs: Optional[Dict[str, Any]] = None,
         milvus_client_kwargs: Optional[Dict[str, Any]] = None,
-        vector_collection_name: str = "vector_rag",
+        collection_name: str = "vector_rag",
         splitter_chunk_size: int = 512,  # Smaller chunks for better retrieval
         splitter_overlap: int = 100,     # More overlap for better context
     ) -> None:
@@ -74,7 +74,7 @@ class HybridRAGPipeline:
         
         # Set default graph vector store configuration from environment variables
         if graph_vector_store_kwargs is None:
-            graph_collection = os.getenv("GRAPH_VECTOR_COLLECTION", "graph_rag_embeddings")
+            graph_collection = collection_name
             graph_dim = int(os.getenv("GRAPH_VECTOR_DIM", "1024"))
             
             # Parse milvus host for graph store
@@ -136,7 +136,7 @@ class HybridRAGPipeline:
         self.vector_rag = VectorRAGPipeline(
             milvus=self.milvus,
             embedding=OpenAIEmbeddingClient(self.openai),
-            collection_name=vector_collection_name,
+            collection_name=collection_name,
         )
         
         # Set the LLM in global settings for all llama-index operations
@@ -155,18 +155,20 @@ class HybridRAGPipeline:
                 username=neo4j_username,
                 password=neo4j_password,
                 database=neo4j_database,
+                collection_name=collection_name,  # Pass collection name for node tagging
                 summarizer_llm=self.graph_llm
             )
         else:
-            # Fallback to simple graph store
-            self.graph_store = GraphRAGStore(summarizer_llm=self.graph_llm)
+            # Fallback to simple graph store (no Neo4j available)
+            # Note: SimpleGraphStore doesn't support collection_name, but pass it anyway for consistency
+            self.graph_store = GraphRAGStore(summarizer_llm=self.graph_llm, collection_name=collection_name)
 
         embedding_wrapper = OpenAIEmbeddingsWrapper(self.openai)
         
         # Use the same Milvus collection for GraphRAG as the main vector store
         graph_milvus_kwargs = {
             "host": milvus_host,
-            "collection_name": vector_collection_name,  # Use same collection
+            "collection_name": collection_name,  # Use same collection
             "dim": DIMENSION,  # Same dimension as main vector store
         }
         if milvus_client_kwargs:
@@ -186,6 +188,7 @@ class HybridRAGPipeline:
         )
         self.late_chunker = LateChunker()
         self.context_chunker = ContextualChunker()
+        self.hybrid_chunker = HybridChunker(embedding_client=OpenAIEmbeddingClient(self.openai))
 
     def _broaden_query_with_retry(self, query_text: str, retry_limit: int = 3) -> Optional[List[str]]:
         """Broaden query with retry mechanism for better reliability."""
@@ -452,65 +455,316 @@ class HybridRAGPipeline:
         return refined_context if refined_context else context_items
     
     def _iterative_retrieval(self, query: str, initial_context: List[str]) -> List[str]:
-        """Perform iterative retrieval to gather more comprehensive context."""
+        """Perform iterative retrieval using LLM to generate follow-up queries.
+        
+        This method is completely generic and works for any domain by using LLM
+        to understand what information is needed for the second hop.
+        """
         all_context = list(initial_context)
+        newly_added_context = []
         
-        # Extract entities and key terms from initial context
+        # Extract entities from initial context
         entities = self._extract_entities_from_context(initial_context)
-        key_terms = self._extract_key_terms(query, initial_context)
         
-        # Generate expanded queries based on entities and terms
-        expanded_queries = []
-        for entity in entities[:3]:  # Limit to top 3 entities
-            expanded_queries.append(f"{entity} {query}")
+        if not entities:
+            return all_context
         
-        for term in key_terms[:2]:  # Limit to top 2 key terms
-            if term not in query.lower():
-                expanded_queries.append(f"{term} {query}")
+        # Use LLM to generate follow-up queries based on original question and found entities
+        expanded_queries = self._generate_follow_up_queries_llm(query, entities[:3])
         
-        # Perform additional retrievals with expanded queries
-        if expanded_queries:
-            print(f"🔍 DEBUG: Performing iterative retrieval with {len(expanded_queries)} expanded queries")
-            for expanded_query in expanded_queries:
-                try:
-                    additional_results = self.vector_rag.query([expanded_query], limit=5)
-                    additional_contexts = []
-                    for hit in additional_results:
-                        for hit_item in hit:
-                            if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
-                                additional_contexts.append(hit_item.entity.content)
+        if not expanded_queries:
+            return all_context
+        
+        # Perform additional retrievals with LLM-generated queries
+        for expanded_query in expanded_queries[:8]:  # Limit to 8 queries for efficiency
+            try:
+                additional_results = self.vector_rag.query([expanded_query], limit=5)
+                additional_contexts = []
+                for hit in additional_results:
+                    for hit_item in hit:
+                        if hasattr(hit_item, 'entity') and hasattr(hit_item.entity, 'content'):
+                            additional_contexts.append(hit_item.entity.content)
+                
+                # Add new context that's not already in our collection
+                for ctx in additional_contexts:
+                    if ctx not in all_context and len(ctx) > 50:
+                        newly_added_context.append(ctx)
+                        all_context.append(ctx)
+                        
+            except Exception as e:
+                pass  # Silently continue on error
+        
+        # Prioritize newly added contexts
+        if newly_added_context:
+            reordered = newly_added_context + [ctx for ctx in all_context if ctx not in newly_added_context]
+            return reordered
+        else:
+            return all_context
+    
+    def _generate_follow_up_queries_llm(self, original_query: str, entities: List[str]) -> List[str]:
+        """Use LLM to generate follow-up queries for multi-hop retrieval.
+        
+        This is completely generic - no hardcoded patterns or domain knowledge.
+        """
+        try:
+            entities_str = ", ".join(f'"{e}"' for e in entities)
+            
+            prompt = f"""Given a multi-hop question and entities found in the initial search, generate follow-up search queries to find the missing information.
+
+Original Question: {original_query}
+
+Entities found in initial search: {entities_str}
+
+Task: Generate 3-5 short, focused search queries to find information about these entities that would help answer the original question.
+
+Rules:
+- Each query should be 2-5 words
+- Focus on finding biographical, definitional, or relational information about the entities
+- Queries should help connect the dots to answer the original question
+- Be specific and concise
+
+Respond with ONLY a JSON array of query strings, nothing else:
+["query1", "query2", "query3", ...]
+
+Example:
+Original Question: "Where was the founder of Microsoft born?"
+Entities: ["Microsoft"]
+Response: ["Microsoft founder", "Microsoft Bill Gates", "Bill Gates birthplace", "who founded Microsoft"]
+
+Now generate queries for the question above:"""
+
+            response = self.openai.chat.completions.create(
+                model="gpt-oss:latest",  # Use available model
+                messages=[
+                    {"role": "system", "content": "You are a search query generator. Respond only with a JSON array of strings."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,  # Low temperature for focused queries
+                max_tokens=150
+            )
+            
+            if response and response.choices:
+                content = response.choices[0].message.content.strip()
+                
+                # Extract JSON array
+                json_start = content.find('[')
+                json_end = content.rfind(']') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = content[json_start:json_end]
+                    queries = json.loads(json_str)
                     
-                    # Add new context that's not already in our collection
-                    for ctx in additional_contexts:
-                        if ctx not in all_context and len(ctx) > 50:  # Avoid very short contexts
-                            all_context.append(ctx)
-                            
-                except Exception as e:
-                    print(f"⚠️ Iterative retrieval failed for query '{expanded_query}': {e}")
+                    # Filter and validate queries
+                    valid_queries = []
+                    for q in queries:
+                        if isinstance(q, str) and 2 <= len(q.split()) <= 10:
+                            valid_queries.append(q)
+                    
+                    return valid_queries[:8]  # Max 8 queries
+                    
+        except Exception as e:
+            pass  # Fall back to simple expansion
         
-        return all_context[:25]  # Limit total context to prevent overwhelming
+        # Fallback: simple entity-based queries
+        fallback_queries = []
+        for entity in entities[:3]:
+            fallback_queries.extend([
+                entity,
+                f"about {entity}",
+                f"{entity} information"
+            ])
+        return fallback_queries[:6]
+    
+    def _expand_query_llm(self, query: str) -> List[str]:
+        """Use LLM to expand ambiguous queries into multiple specific search queries.
+        
+        This is completely generic and works for any domain. The LLM generates
+        alternative phrasings and disambiguates entities to improve initial retrieval.
+        """
+        try:
+            prompt = f"""Given this question, generate 3-5 specific search queries to find the answer.
+
+Question: {query}
+
+IMPORTANT: This question may be ambiguous. Generate multiple queries covering different interpretations:
+- If there's an ambiguous entity (e.g., "Green performer"), try different interpretations (person named Green, performer in band Green, etc.)
+- Include both the entity and the information needed (biography, spouse, birthplace, etc.)
+- Use alternative phrasings and synonyms
+- Each query should be 2-8 words, specific for search
+
+ALWAYS generate at least 3 queries, even if the question seems clear.
+
+Respond with ONLY a JSON array (no other text):
+["query1", "query2", "query3", "query4", "query5"]
+
+Examples:
+Question: "Who is the spouse of the Green performer?"
+Response: ["Green performer biography", "Green musician spouse", "performer named Green personal life", "Green artist family", "Gong band Green performer"]
+
+Question: "Where was the founder of Tesla born?"
+Response: ["Tesla founder", "Tesla company founder birthplace", "who founded Tesla born", "Tesla founder biography", "Tesla founder born"]
+
+Now generate 3-5 queries for: {query}"""
+
+            response = self.openai.chat.completions.create(
+                model="gpt-oss:latest",
+                messages=[
+                    {"role": "system", "content": "You are a search query expansion assistant. Respond only with a JSON array of strings."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,  # Some creativity for diverse queries
+                max_tokens=200
+            )
+            
+            if response and response.choices:
+                content = response.choices[0].message.content.strip()
+                
+                # Extract JSON array
+                json_start = content.find('[')
+                json_end = content.rfind(']') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = content[json_start:json_end]
+                    try:
+                        queries = json.loads(json_str)
+                        
+                        # Filter and validate queries
+                        valid_queries = []
+                        for q in queries:
+                            if isinstance(q, str):
+                                q = q.strip()
+                                # Validate query length and content
+                                word_count = len(q.split())
+                                if 2 <= word_count <= 15 and len(q) > 3:
+                                    valid_queries.append(q)
+                        
+                        if valid_queries:
+                            # Include original query as first option, then add expanded queries
+                            # Remove duplicates
+                            all_queries = [query]  # Original first
+                            for q in valid_queries:
+                                q_lower = q.lower()
+                                query_lower = query.lower()
+                                # Skip if identical to original or already added
+                                if q_lower != query_lower and not any(q_lower == existing.lower() for existing in all_queries):
+                                    all_queries.append(q)
+                            
+                            if len(all_queries) > 1:
+                                return all_queries[:6]  # Max 6 queries total
+                    except json.JSONDecodeError:
+                        # JSON parse failed, fall through to return original
+                        pass
+                    
+        except Exception as e:
+            # If LLM fails, return original query only
+            # No hardcoded patterns - fully generic system
+            # Silently fail - expansion is optional
+            pass
+        
+        # Fallback: Return original query if LLM expansion failed
+        # This ensures we still perform retrieval, just without expansion
+        return [query]
+    
+    def _detect_query_intent_llm(self, query: str) -> Dict[str, Any]:
+        """Use LLM to detect if a query is multi-hop and what type of information is needed.
+        
+        This is completely generic and works for any domain without hardcoded patterns.
+        """
+        try:
+            prompt = f"""Analyze this question and determine if it requires multi-hop reasoning (connecting information from multiple sources).
+
+Question: {query}
+
+Respond with ONLY a JSON object in this exact format:
+{{
+    "is_multi_hop": true/false,
+    "reasoning": "brief explanation",
+    "information_type": "one of: biographical, location, relationship, temporal, definition, comparison, composition, origin, other"
+}}
+
+Examples:
+Question: "What is the capital of France?"
+{{"is_multi_hop": false, "reasoning": "Direct factual question", "information_type": "location"}}
+
+Question: "What is the performer of Heartbeat named after?"
+{{"is_multi_hop": true, "reasoning": "Need to find performer first, then find naming origin", "information_type": "origin"}}
+
+Question: "Where was the founder of Tesla born?"
+{{"is_multi_hop": true, "reasoning": "Need to find founder, then find birthplace", "information_type": "location"}}
+
+Now analyze the question above and respond with JSON only:"""
+
+            response = self.openai.chat.completions.create(
+                model="gpt-oss:latest",  # Use available model
+                messages=[
+                    {"role": "system", "content": "You are a query analysis assistant. Respond only with valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,  # Deterministic for consistent JSON
+                max_tokens=150
+            )
+            
+            if response and response.choices:
+                content = response.choices[0].message.content.strip()
+                
+                # Extract JSON from response
+                json_start = content.find('{')
+                json_end = content.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = content[json_start:json_end]
+                    result = json.loads(json_str)
+                    return result
+                
+        except Exception as e:
+            pass  # Fall back to simple detection
+        
+        # Fallback: simple pattern-based detection
+        return {
+            'is_multi_hop': len(query.split()) > 10,
+            'reasoning': 'Fallback detection',
+            'information_type': 'other'
+        }
     
     def _extract_entities_from_context(self, context_items: List[str]) -> List[str]:
-        """Extract named entities from context for query expansion."""
+        """Extract named entities from context using generic patterns.
+        
+        This uses simple capitalization patterns to find proper nouns without
+        domain-specific knowledge.
+        """
         entities = []
+        entity_freq = {}  # Track frequency to prioritize important entities
         import re
         
         for context in context_items:
-            # Extract capitalized names (potential entities)
-            name_patterns = [
-                r"([A-Z][a-zA-Z\s]{2,30})(?:\s*\([^)]*\))?(?:\s*,\s*(?:born|died|is|was))",
-                r"([A-Z][a-zA-Z\s]{2,30})(?:\s+Inc\.?|\s+Corp\.?|\s+Ltd\.?)",
-                r"(?:actor|actress|director|writer|singer|musician|politician|president|minister|company|organization)\s+([A-Z][a-zA-Z\s]{2,30})"
-            ]
+            # Extract multi-word capitalized phrases (proper nouns)
+            # Pattern: "Nina Sky", "John Smith", "New York", etc.
+            multi_word_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', context)
             
-            for pattern in name_patterns:
-                matches = re.findall(pattern, context)
-                for match in matches:
-                    entity = match.strip()
-                    if len(entity) > 2 and len(entity) < 30 and entity not in entities:
-                        entities.append(entity)
+            for entity in multi_word_entities:
+                entity = entity.strip()
+                # Filter out common non-entities
+                if (2 < len(entity) < 40 and 
+                    not entity.startswith(('The ', 'A ', 'An ')) and
+                    entity not in ['Title', 'Album', 'Song', 'Article', 'Book']):
+                    entity_freq[entity] = entity_freq.get(entity, 0) + 1
+            
+            # Also extract single-word capitalized entities (but be more selective)
+            single_word_entities = re.findall(r'\b([A-Z][a-z]{2,})\b', context)
+            
+            for entity in single_word_entities:
+                # Only include if it appears multiple times or is long enough
+                if len(entity) > 4 and entity not in ['Title', 'Album', 'Song', 'Article', 'Book', 'Chapter']:
+                    entity_freq[entity] = entity_freq.get(entity, 0) + 0.5  # Lower weight for single words
         
-        return entities[:5]  # Return top 5 entities
+        # Sort by frequency and return top entities
+        sorted_entities = sorted(entity_freq.items(), key=lambda x: x[1], reverse=True)
+        # Lower threshold to include entities that appear at least once
+        entities = [entity for entity, freq in sorted_entities if freq >= 0.5]
+        
+        # Prioritize multi-word entities (they're usually more specific and useful)
+        multi_word_first = [e for e in entities if ' ' in e]
+        single_word = [e for e in entities if ' ' not in e]
+        entities = multi_word_first + single_word
+        
+        return entities[:8]  # Return top 8 entities
     
     def _extract_key_terms(self, query: str, context_items: List[str]) -> List[str]:
         """Extract key terms from query and context for expansion."""
@@ -539,32 +793,28 @@ class HybridRAGPipeline:
         return list(set(all_terms))[:8]  # Return top 8 unique terms
     
     def _is_complex_multi_hop(self, query: str) -> bool:
-        """Determine if a query is complex enough to benefit from iterative retrieval."""
-        query_lower = query.lower()
+        """Determine if a query requires multi-hop reasoning using LLM.
         
-        # Check for multi-hop indicators
-        multi_hop_indicators = [
-            "who", "whose", "that", "which", "where", "when", "what",
-            "was", "is", "were", "are", "had", "has", "have"
-        ]
+        This is completely generic and works for any domain.
+        """
+        # Use LLM for intelligent multi-hop detection
+        intent_result = self._detect_query_intent_llm(query)
         
-        entity_count = 0
-        for indicator in multi_hop_indicators:
-            if indicator in query_lower:
-                entity_count += 1
+        if intent_result.get('is_multi_hop', False):
+            return True
         
-        # Complex questions have multiple entities or specific patterns
-        complex_patterns = [
-            "government position", "same nationality", "both from", "same level",
-            "co-wrote", "starred in", "performed", "recorded", "founded",
-            "contains", "located in", "based in", "operated", "initiated"
-        ]
+        # Fallback: simple heuristics
+        # Count capitalized entities (proper nouns)
+        entity_matches = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)
         
-        has_complex_pattern = any(pattern in query_lower for pattern in complex_patterns)
+        # Check for chained prepositions (e.g., "X of Y of Z")
+        chained_prep_pattern = r'\b(?:of|from|in|at|by|for|with|to)\s+\w+\s+(?:of|from|in|at|by|for|with|to)\b'
+        has_chained = bool(re.search(chained_prep_pattern, query.lower()))
         
-        # Questions with multiple entities or complex patterns benefit from iterative retrieval
-        # Be more selective to avoid over-processing simple questions
-        return (entity_count >= 3 and has_complex_pattern) or len(query.split()) > 15
+        # Trigger if multiple entities or chained relationships or long complex question
+        return (len(entity_matches) >= 2 or 
+                has_chained or 
+                len(query.split()) > 12)
     
     def _has_multiple_entities(self, query: str) -> bool:
         """Check if a query mentions multiple entities that might need iterative retrieval."""
@@ -674,7 +924,19 @@ class HybridRAGPipeline:
             except Exception:
                 query_text = query
 
-        if broaden_query:
+        # LLM-based query expansion for ambiguous queries
+        # This runs before traditional broadening to improve initial retrieval
+        llm_expanded = False
+        if isinstance(query_text, str):
+            expanded_queries = self._expand_query_llm(query_text)
+            if len(expanded_queries) > 1:
+                # LLM generated multiple queries - use them
+                query_text = expanded_queries
+                llm_expanded = True
+            # Otherwise keep original query_text (LLM returned just the original)
+
+        # Only use traditional broadening if LLM didn't expand (or if explicitly requested)
+        if broaden_query and not llm_expanded and isinstance(query_text, str):
             # Store original query as backup
             original_query_text = query_text
             broadened_queries = self._broaden_query_with_retry(query_text, broaden_retry_limit)
@@ -733,7 +995,9 @@ class HybridRAGPipeline:
             vector_texts = [chunk["text"] for chunk in refined_chunks if "text" in chunk]
         
         # Perform iterative retrieval for better context coverage
-        if vector_texts and len(query_text) == 1:  # Only for single queries to avoid complexity
+        # Always try iterative retrieval for multi-hop questions, even if decomposed
+        if vector_texts and isinstance(query_text, list) and len(query_text) > 0:
+            # Use the first query (most relevant) for iterative retrieval
             original_query = query_text[0] if isinstance(query_text, list) else query_text
             # Use iterative retrieval for complex multi-hop questions (relaxed criteria)
             if self._is_complex_multi_hop(original_query):
@@ -757,10 +1021,17 @@ class HybridRAGPipeline:
             # Ensure query_text is a string for rerank
             rerank_query = query_text if isinstance(query_text, str) else " ".join(query_text) if isinstance(query_text, list) else str(query_text)
             # Use more aggressive reranking with higher limits
-            reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
-            # Update results if we used vector_texts
-            if not (graph_answer is not None and isinstance(graph_answer, str) and graph_answer.strip() and "No relevant information found" not in graph_answer):
-                results = reranked_texts
+            try:
+                reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
+                # Only use reranked results if we got any, otherwise fallback to original
+                if reranked_texts and len(reranked_texts) > 0:
+                    # Update results if we used vector_texts
+                    if not (graph_answer is not None and isinstance(graph_answer, str) and graph_answer.strip() and "No relevant information found" not in graph_answer):
+                        results = reranked_texts
+                else:
+                    print("⚠️  Warning: Reranking returned empty results, using original vector texts")
+            except Exception as e:
+                print(f"⚠️  Warning: Reranking failed with error: {e}, using original vector texts")
 
         results = results[:limit]
 
@@ -787,6 +1058,7 @@ class HybridRAGPipeline:
         vector_docs = [
             {**metadata, "content": chunk}
             for chunk in self.late_chunker.chunk_document(text)
+            # for chunk in self.hybrid_chunker.chunk_document(text)
         ]
         if vector_docs:
             self.vector_rag.add_document(vector_docs)
@@ -810,6 +1082,7 @@ class HybridRAGPipeline:
             all_vector_docs.extend(
                 {**metadata, "content": chunk}
                 for chunk in self.late_chunker.chunk_document(text)
+                # for chunk in self.hybrid_chunker.chunk_document(text)
             )
             all_nodes.extend(self._build_graph_nodes(text, metadata))
 

@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .conda/
 comp.egg-info/
+reqquest.egg-info/
 ._*
 *.pdf
 *.png
@@ -30,6 +31,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*.ipynb
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

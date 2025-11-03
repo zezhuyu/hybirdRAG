@@ -16,8 +16,10 @@ class OpenAIEmbeddingClient:
             )
             return response.data[0].embedding
         except Exception as e:
-            print(f"⚠️  Batch embedding failed, using individual calls: {e}")
-            return None
+            print(f"❌ Embedding failed for sentence: {e}")
+            print(f"   Model: {self.model_name}")
+            print(f"   Sentence length: {len(sentence)} chars")
+            raise  # Re-raise the exception instead of returning None
 
     def embed_sentences(self, sentences: List[str]) -> List[List[float]]:
         """

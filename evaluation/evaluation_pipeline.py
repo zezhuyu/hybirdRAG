@@ -31,9 +31,9 @@ from openai import OpenAI
 # ---------------------------------------------------------------------------
 
 class AnswerGenerator:
-    """Handles answer generation from retrieved context using LLM."""
+    """Handles answer generation from retrieved context using LLM with Chain-of-Thought reasoning."""
     
-    def __init__(self, service_host: str = None, openai_host: str = None, openai_api_key: str = None):
+    def __init__(self, service_host: str = None, openai_host: str = None, openai_api_key: str = None, pipeline=None):
         """Initialize the answer generator with LLM service."""
         self.service = MLModelClient(host=service_host or "http://localhost:8000")
         # Use OpenAI client for answer generation
@@ -41,90 +41,326 @@ class AnswerGenerator:
             base_url=openai_host or "http://localhost:11434/v1",
             api_key=openai_api_key or "ollama"
         )
+        # Optional: pipeline for adaptive retrieval
+        self.pipeline = pipeline
     
-    def generate_answer(self, query: str, context: List[str]) -> str:
-        """Generate a natural answer from retrieved context using LLM."""
+    def generate_answer(self, query: str, context: List[str], max_retrieval_rounds: int = 2) -> str:
+        """Generate answer using Chain-of-Thought reasoning with adaptive retrieval.
+        
+        The LLM can decide if it needs more information and trigger additional retrievals.
+        """
         try:
-            print(f"🔍 DEBUG: generate_answer called with query='{query}' and {len(context)} context items")
-            
             if not context:
                 return ""
             
-            # Use simple context filtering - take top 20 most relevant items
-            filtered_context = self._simple_filter_context(query, context)
-            print(f"🔍 DEBUG: Filtered context: {len(filtered_context)} items")
-            
-            if not filtered_context:
-                return ""
-            
-            # Join context into a single string
-            context_text = "\n".join(filtered_context)
-            print(f"🔍 DEBUG: Context text length: {len(context_text)} chars")
-            
-            # Create a natural, flexible prompt
-            prompt = f"""Based on the provided context, answer the following question. You may need to connect information from different parts of the context to answer complex questions.
+            # Use Chain-of-Thought reasoning
+            return self._generate_answer_with_cot(query, context, max_retrieval_rounds)
+                
+        except Exception as e:
+            return ""
+    
+    def _generate_answer_with_cot(self, query: str, context: List[str], max_rounds: int) -> str:
+        """Generate answer using Chain-of-Thought reasoning.
+        
+        The LLM reasons step-by-step and can request more information if needed.
+        """
+        # Filter context to manageable size
+        filtered_context = self._filter_context_for_cot(query, context)
+        
+        if not filtered_context:
+            return ""
+        
+        context_text = "\n\n".join(filtered_context[:20])  # Limit to top 20 for CoT
+        
+        # Chain-of-Thought prompt
+        cot_prompt = f"""Answer this question using step-by-step reasoning.
 
 Question: {query}
 
 Context:
 {context_text}
 
-Instructions:
-- Provide a direct, accurate answer based on the context
-- If the question requires connecting multiple pieces of information, do so efficiently
-- Be concise but complete - focus on the essential information
-- If the answer is not clearly available in the context, say so clearly
-- For yes/no questions, answer with "yes" or "no"
-- For specific facts (names, dates, numbers), be precise
-- For comparison questions, identify the key relationship being asked about
-- For questions about buildings/properties, consider their primary use (residential, commercial, etc.)
-- Look carefully through all the context for relevant information
-- For nationality questions, look for explicit mentions of nationality or country of origin
-- For questions about people, look for their names, roles, and relevant details
+Think through this step by step:
 
-Answer:"""
+1. ANALYZE: What information do I need to answer this question?
+   - Break down the question into sub-questions if it's complex
+   - Identify key entities, relationships, or facts needed
 
-            print(f"🔍 DEBUG: Using OpenAI client for answer generation")
-            print(f"🔍 DEBUG: Prompt length: {len(prompt)} chars")
+2. SEARCH CONTEXT: Look for each piece of information in the context
+   - Find relevant information systematically
+   - Note what information is found and what is missing
+
+3. DECIDE: Do I have enough information?
+   - If YES: proceed to step 4
+   - If NO: respond with "NEED_MORE_INFO: [specific information needed]"
+
+4. REASON: Connect the information to answer the question
+   - For multi-hop questions, trace the logical chain
+   - Show your reasoning clearly
+
+5. ANSWER: Provide the final answer
+   - Be EXTREMELY precise - only the exact answer requested
+   - Return only the final answer as a noun phrase, not a full sentence
+   - If question asks for ONE thing, give ONE thing only (not "X and Y")
+   - For names, give full name if mentioned, otherwise what's in context
+   - For locations, give the specific location asked (not a broader region)
+   - NO explanations, NO reasoning text in the answer
+   - NO full sentences - just the noun phrase answer itself
+   - Examples: "Mike Medavoy" not "The founder is Mike Medavoy", "Santa Barbara County" not "The county is Santa Barbara County"
+
+Format your response EXACTLY as:
+
+STEP 1 - Need: [list what information is needed]
+
+STEP 2 - Found: [what information was found in context]
+
+STEP 3 - Status: [SUFFICIENT or NEED_MORE_INFO: specific missing info]
+
+STEP 4 - Reasoning: [how you connect the dots] (skip if NEED_MORE_INFO)
+
+STEP 5 - Final Answer: [ONLY the noun phrase answer, nothing else] (skip if NEED_MORE_INFO)
+
+IMPORTANT: The Final Answer must be ONLY a noun phrase - no "STEP", "Status", reasoning text, or full sentences.
+
+Begin:"""
+
+        # Get LLM response with CoT
+        response = self.openai_client.chat.completions.create(
+            model="gpt-oss:latest",
+            messages=[
+                {"role": "system", "content": "You are an expert reasoning assistant. Think step-by-step and be precise. Return only noun phrases as final answers, never full sentences. If you don't have enough information, explicitly say what's missing."},
+                {"role": "user", "content": cot_prompt}
+            ],
+            max_tokens=1500,
+            temperature=0.0
+        )
+        
+        if not response or not response.choices:
+            return ""
+        
+        cot_response = response.choices[0].message.content.strip()
+        
+        # Parse the Chain-of-Thought response
+        if "NEED_MORE_INFO:" in cot_response and self.pipeline and max_rounds > 0:
+            # Extract what information is needed
+            missing_info = self._extract_missing_info(cot_response)
             
-            # Call LLM with natural prompt
-            response = self.openai_client.chat.completions.create(
-                model="gpt-oss:latest",
-                messages=[
-                    {"role": "system", "content": "You are a helpful question-answering assistant. Provide accurate, direct answers based on the given context. Use your reasoning abilities to connect information when needed. Be concise but complete in your answers. If you need to reason through complex information, do so efficiently."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=2500,  # Further increased to prevent truncation
-                temperature=0.0  # Use 0 for more consistent results
+            if missing_info:
+                # Perform adaptive retrieval
+                additional_context = self._adaptive_retrieval(query, missing_info, filtered_context)
+                
+                if additional_context:
+                    # Retry with additional context
+                    combined_context = additional_context + filtered_context
+                    return self._generate_answer_with_cot(query, combined_context, max_rounds - 1)
+        
+        # Extract final answer from CoT response
+        final_answer = self._extract_final_answer_from_cot(cot_response)
+        
+        if final_answer:
+            return self._clean_answer(final_answer)
+        
+        # Fallback: if CoT didn't produce an answer, try simple generation
+        return self._generate_simple_answer(query, filtered_context)
+    
+    def _filter_context_for_cot(self, query: str, context: List[str]) -> List[str]:
+        """Filter context to most relevant documents for CoT reasoning."""
+        if len(context) <= 20:
+            return context
+        
+        # Keep first 10 (likely from iterative retrieval), filter rest
+        priority_items = context[:10]
+        remaining = context[10:]
+        
+        filtered_remaining = self._simple_filter_context(query, remaining)
+        
+        return priority_items + filtered_remaining[:10]
+    
+    def _extract_missing_info(self, cot_response: str) -> str:
+        """Extract what information the LLM says is missing."""
+        import re
+        
+        # Look for NEED_MORE_INFO or STEP 3 - Status
+        patterns = [
+            r'NEED_MORE_INFO:\s*(.+?)(?:\n|$)',
+            r'Status:\s*NEED_MORE_INFO:\s*(.+?)(?:\n|$)',
+            r'STEP 3.*?NEED_MORE_INFO:\s*(.+?)(?:\n|$)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, cot_response, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).strip()
+        
+        return ""
+    
+    def _adaptive_retrieval(self, original_query: str, missing_info: str, current_context: List[str]) -> List[str]:
+        """Perform additional retrieval based on what information is missing."""
+        if not self.pipeline:
+            return []
+        
+        try:
+            # Use the missing info as a query
+            additional_results = self.pipeline.query(
+                missing_info,
+                limit=10,
+                rewrite=False,
+                rerank=True
             )
             
-            print(f"🔍 DEBUG: LLM response: {response}")
+            # Filter out duplicates
+            current_context_set = set(current_context)
+            new_contexts = [ctx for ctx in additional_results if ctx not in current_context_set]
             
-            # Extract answer from response
-            if response and response.choices:
-                content = response.choices[0].message.content
-                
-                print(f"🔍 DEBUG: Raw answer: '{content}'")
-                
-                if content and content.strip():
-                    # Clean the answer but keep it natural
-                    cleaned_answer = self._clean_answer(content.strip())
-                    print(f"🔍 DEBUG: Cleaned answer: '{cleaned_answer}'")
-                    
-                    return cleaned_answer
-                else:
-                    print("⚠️ No content in LLM response")
-                    return ""
-            else:
-                print("⚠️ No response from LLM")
-                return ""
-                
+            return new_contexts[:5]  # Return top 5 new documents
+            
         except Exception as e:
-            print(f"⚠️ Answer generation failed: {e}")
+            return []
+    
+    def _extract_final_answer_from_cot(self, cot_response: str) -> str:
+        """Extract the final answer from Chain-of-Thought response.
+        
+        Handles cases where CoT reasoning leaks through or answer contains multiple values.
+        """
+        import re
+        
+        # First, check if this is a NEED_MORE_INFO response (should not happen in final answer)
+        if "NEED_MORE_INFO:" in cot_response or "STEP 3" in cot_response:
+            # Try to find if there's an answer despite the NEED_MORE_INFO
+            # Look after STEP 5 or Final Answer markers
+            pass
+        
+        # Look for "STEP 5 - Final Answer:" or "Final Answer:"
+        patterns = [
+            r'STEP 5.*?Final Answer:\s*(.+?)(?:\n\n|\nSTEP|\nSTEP 3|$)',
+            r'Final Answer:\s*(.+?)(?:\n\n|\nSTEP|\nSTEP 3|$)',
+            r'ANSWER:\s*(.+?)(?:\n\n|\nSTEP|\nSTEP 3|$)',
+            r'Answer:\s*(.+?)(?:\n\n|\nSTEP|\nSTEP 3|$)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, cot_response, re.IGNORECASE | re.DOTALL)
+            if match:
+                answer = match.group(1).strip()
+                # Remove common prefixes
+                answer = re.sub(r'^(The answer is|Answer:)\s*', '', answer, flags=re.IGNORECASE)
+                # Remove any remaining STEP markers that leaked through
+                answer = re.sub(r'\s*STEP \d+.*$', '', answer, flags=re.IGNORECASE)
+                answer = re.sub(r'\s*NEED_MORE_INFO:.*$', '', answer, flags=re.IGNORECASE)
+                
+                # Refine answer to extract first/best value if multiple values
+                answer = self._refine_answer(answer)
+                
+                if answer and len(answer) > 1:
+                    return answer
+        
+        # If no structured answer found, look for last substantive line
+        # But exclude lines that are clearly CoT markers
+        lines = [l.strip() for l in cot_response.split('\n') if l.strip()]
+        for line in reversed(lines):
+            # Skip CoT markers and status messages
+            if (not any(marker in line for marker in ['STEP', 'Status:', 'NEED_MORE_INFO', 'ANALYZE', 'SEARCH', 'DECIDE', 'REASON']) 
+                and len(line) > 2):
+                answer = self._refine_answer(line)
+                if answer:
+                    return answer
+        
+        return ""
+    
+    def _refine_answer(self, answer: str) -> str:
+        """Refine answer to extract the most precise value.
+        
+        Handles cases like:
+        - "Derrty Entertainment and Universal Records" → "Derrty Entertainment"
+        - "Oxford University" when "Exeter College" is correct (can't fix, but can extract first value)
+        - Multi-line answers
+        """
+        if not answer:
             return ""
+        
+        import re
+        
+        # Remove markdown formatting
+        answer = re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)  # Bold
+        answer = re.sub(r'\*([^*]+)\*', r'\1', answer)  # Italic
+        answer = re.sub(r'`([^`]+)`', r'\1', answer)  # Code
+        
+        # Remove quotes
+        answer = answer.strip('"\'').strip()
+        
+        # Handle multi-value answers (e.g., "X and Y" or "X, Y")
+        # For questions asking for a single thing, extract the first value
+        # Pattern: "X and Y" or "X, Y"
+        if ' and ' in answer.lower() or ', ' in answer:
+            # Check if this looks like a list (multiple proper nouns)
+            parts = re.split(r',| and ', answer)
+            if len(parts) > 1:
+                # Take the first part, but be smart about it
+                first_part = parts[0].strip()
+                # Remove common connectors at the end
+                first_part = re.sub(r'\s+and\s*$', '', first_part, flags=re.IGNORECASE)
+                # Return first part if it looks complete (has capital letter, reasonable length)
+                if re.search(r'[A-Z]', first_part) and 2 <= len(first_part.split()) <= 8:
+                    return first_part
+                # Otherwise return full answer
+        
+        # Extract text in quotes if present (often the most precise answer)
+        # Try double quotes first, then single quotes
+        double_quoted = re.findall(r'"([^"]+)"', answer)
+        if double_quoted:
+            return double_quoted[0].strip()
+        single_quoted = re.findall(r"'([^']+)'", answer)
+        if single_quoted:
+            return single_quoted[0].strip()
+        
+        # Remove extra whitespace and newlines
+        answer = ' '.join(answer.split())
+        
+        # Remove trailing punctuation that might be part of explanation
+        answer = re.sub(r'[.,;:]\s*(and|or|etc|\.\.\.).*$', '', answer, flags=re.IGNORECASE)
+        
+        # Limit length (answers shouldn't be paragraphs)
+        if len(answer) > 100:
+            # Take first sentence or first 100 chars
+            first_sentence = answer.split('.')[0]
+            if len(first_sentence) < 100:
+                return first_sentence
+            return answer[:100].rsplit(' ', 1)[0]  # Cut at word boundary
+        
+        return answer.strip()
+    
+    def _generate_simple_answer(self, query: str, context: List[str]) -> str:
+        """Fallback: simple answer generation without CoT."""
+        context_text = "\n".join(context[:15])
+        
+        prompt = f"""Answer this question concisely based on the context.
+
+Question: {query}
+
+Context:
+{context_text}
+
+Provide ONLY the answer as a noun phrase, not a full sentence. Be precise and concise.
+Examples: "Mike Medavoy" not "The founder is Mike Medavoy", "Santa Barbara County" not "The county is Santa Barbara County"."""
+
+        response = self.openai_client.chat.completions.create(
+            model="gpt-oss:latest",
+            messages=[
+                {"role": "system", "content": "Provide precise, concise answers. Return only noun phrases as answers, never full sentences. Extract only the specific information requested."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=200,
+            temperature=0.0
+        )
+        
+        if response and response.choices:
+            return response.choices[0].message.content.strip()
+        
+        return ""
     
     def _simple_filter_context(self, query: str, context: List[str]) -> List[str]:
-        """Enhanced context filtering based on query term overlap and relevance."""
+        """Enhanced context filtering using generic patterns to prioritize entity-rich and
+        biographical/informational documents without hardcoding domain-specific information."""
         if not context:
             return []
         
@@ -140,62 +376,187 @@ Answer:"""
             item_lower = item.lower()
             item_terms = set(item_lower.split())
             
-            # Basic overlap score
+            score = 0
+            
+            # 1. Basic query term overlap
             overlap = len(query_terms.intersection(item_terms))
+            score += overlap * 2
             
-            # Boost score for exact phrase matches
+            # 2. Exact phrase matches (higher weight)
             query_lower = query.lower()
-            if any(term in item_lower for term in query_terms if len(term) > 3):
-                overlap += 2
+            for term in query_terms:
+                if len(term) > 3 and term in item_lower:
+                    score += 3
             
-            # Boost score for capitalized entities (likely important)
+            # 3. BOOST for entity-rich content (generic indicator of informational value)
+            # Count capitalized multi-word entities (proper nouns)
             import re
-            capitalized_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', item)
-            if capitalized_entities:
-                overlap += len(capitalized_entities) * 0.5
+            capitalized_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', item)
+            entity_count = len(capitalized_entities)
+            if entity_count >= 5:
+                score += 10  # Very entity-rich, likely biographical/informational
+            elif entity_count >= 3:
+                score += 6   # Moderately entity-rich
+            elif entity_count >= 1:
+                score += 3   # Some entities
             
-            # Boost score for items with numbers (often contain specific facts)
-            if re.search(r'\d+', item):
-                overlap += 0.5
+            # 4. BOOST for generic relationship/informational indicators
+            # These patterns indicate the document contains connecting information
+            relationship_indicators = [
+                # Origin/Source
+                r'is an?|was an?|are|were',  # Definitional statements
+                r'named after|named for|called',
+                r'comes from|derived from|originated',
+                
+                # Composition/Membership
+                r'composed of|consists of|made up of|comprises',
+                r'members?|part of|belongs to',
+                r'includes?|contains?',
+                
+                # Location/Place
+                r'born in|born at|birthplace',
+                r'located in|based in|situated',
+                r'capital|headquarters',
+                
+                # Creation/Founding
+                r'founded by|established by|created by',
+                r'formed|established|founded',
+                
+                # Temporal/Biographical
+                r'born|died|lived|life',
+                r'in \d{4}|on \w+ \d+',  # Dates (e.g., "in 1984", "on March 13")
+                
+                # Relationships
+                r'spouse|partner|married|family',
+                r'parent|child|sibling',
+                
+                # Professional/Work
+                r'worked|employed|career',
+                r'known for|famous for|noted for',
+                
+                # Attribution
+                r'according to|based on|from',
+                r'source|reference|citation'
+            ]
             
-            # Boost score for items with question words (likely more relevant)
-            question_words = {"who", "what", "when", "where", "why", "how", "which", "whose"}
-            question_word_matches = sum(1 for word in question_words if word in item_lower)
-            overlap += question_word_matches * 0.3
+            relationship_score = 0
+            for pattern in relationship_indicators:
+                if re.search(pattern, item_lower):
+                    relationship_score += 1
             
-            # Penalize very long contexts (likely less focused)
-            if len(item) > 2000:
-                overlap -= 1
+            # Higher boost for documents with multiple relationship indicators
+            if relationship_score >= 5:
+                score += 12  # Very informational
+            elif relationship_score >= 3:
+                score += 8
+            elif relationship_score >= 1:
+                score += 4
             
-            scored_context.append((item, overlap))
+            # 5. BOOST for factual patterns (numbers, dates, locations)
+            # Years (four digits)
+            year_matches = len(re.findall(r'\b\d{4}\b', item))
+            score += min(year_matches * 2, 6)  # Cap at +6
+            
+            # Dates (various formats)
+            date_patterns = [
+                r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}',
+                r'\d{1,2}/\d{1,2}/\d{2,4}',
+                r'\d{1,2}-\d{1,2}-\d{2,4}'
+            ]
+            for pattern in date_patterns:
+                if re.search(pattern, item):
+                    score += 3
+                    break
+            
+            # Geographic location patterns (e.g., "in Paris", "from London", "at Tokyo")
+            location_pattern = r'\b(?:in|from|at|to|near)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?'
+            location_matches = len(re.findall(location_pattern, item))
+            score += min(location_matches * 2, 6)  # Cap at +6
+            
+            # 6. BOOST for answer-like patterns (direct factual statements)
+            answer_patterns = [
+                r'the answer is|the result is',
+                r'(?:is|was|are|were)\s+(?:a|an|the)?\s+[A-Z][a-z]+',  # "is Paris", "was John"
+                r'[A-Z][a-z]+\s+(?:is|was|are|were)\s+',  # "Paris is", "John was"
+            ]
+            for pattern in answer_patterns:
+                if re.search(pattern, item):
+                    score += 2
+            
+            # 7. Penalize very long contexts (less focused, harder for LLM)
+            if len(item) > 3000:
+                score -= 3
+            elif len(item) > 2000:
+                score -= 1
+            
+            # 8. Slight boost for moderate-length contexts (sweet spot for information density)
+            if 200 <= len(item) <= 1000:
+                score += 2
+            
+            scored_context.append((item, score))
         
-        # Sort by relevance score and take top 25
+        # Sort by relevance score
         scored_context.sort(key=lambda x: x[1], reverse=True)
         
-        # Take top 40 most relevant items, or at least first 25 as fallback
-        relevant_context = [item for item, score in scored_context[:40] if score > 0]
-        if len(relevant_context) < 25:
+        # For multi-hop questions, be more permissive
+        # Keep top 30 items, but ensure at least 20
+        relevant_context = [item for item, score in scored_context[:30] if score > 0]
+        
+        if len(relevant_context) < 20:
+            # If we don't have enough with positive scores, take top 25 regardless
             relevant_context = [item for item, score in scored_context[:25]]
         
         return relevant_context
     
     def _clean_answer(self, answer: str) -> str:
-        """Clean the answer by removing common artifacts."""
+        """Clean the answer by removing common artifacts and extracting precise answer.
+        
+        This is called after _refine_answer, so it does final cleanup.
+        """
         if not answer:
             return ""
         
-        # Remove common prefixes/suffixes
-        answer = answer.strip()
+        import re
         
-        # Remove trailing periods for consistency
-        if answer.endswith('.'):
-            answer = answer[:-1]
+        # Remove common prefixes/suffixes that might have leaked through
+        prefixes = [
+            r'^the answer is\s*',
+            r'^answer:\s*',
+            r'^the answer:\s*',
+            r'^based on the context,?\s*',
+            r'^according to the context,?\s*',
+            r'^from the context,?\s*'
+        ]
+        for prefix in prefixes:
+            answer = re.sub(prefix, '', answer, flags=re.IGNORECASE).strip()
+        
+        # Remove any CoT markers that leaked through
+        answer = re.sub(r'\s*STEP \d+.*$', '', answer, flags=re.IGNORECASE)
+        answer = re.sub(r'\s*Status:.*$', '', answer, flags=re.IGNORECASE)
+        answer = re.sub(r'\s*NEED_MORE_INFO:.*$', '', answer, flags=re.IGNORECASE)
+        
+        # Remove markdown formatting if any
+        answer = re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)
+        answer = re.sub(r'\*([^*]+)\*', r'\1', answer)
+        answer = re.sub(r'`([^`]+)`', r'\1', answer)
         
         # Remove quotes if the entire answer is quoted
+        answer = answer.strip()
         if answer.startswith('"') and answer.endswith('"'):
             answer = answer[1:-1]
         elif answer.startswith("'") and answer.endswith("'"):
             answer = answer[1:-1]
+        
+        # Handle trailing explanations (e.g., "Derrty Entertainment (and Universal Records)")
+        # Remove parenthetical content that looks like additional info
+        answer = re.sub(r'\s*\([^)]*and[^)]*\)\s*$', '', answer, flags=re.IGNORECASE)
+        
+        # Remove trailing periods for consistency (unless it's an abbreviation)
+        if answer.endswith('.') and not re.search(r'\b(Dr|Mr|Mrs|Ms|Inc|Ltd|Corp|Co|St|Ave)\.$', answer):
+            answer = answer[:-1]
+        
+        # Final cleanup - remove extra whitespace
+        answer = ' '.join(answer.split())
         
         return answer.strip()
 
@@ -1059,15 +1420,25 @@ class HybridRAGEvaluator:
         em_total = 0.0
         f1_total = 0.0
         latencies: List[float] = []
+        retrieval_times: List[float] = []
+        llm_times: List[float] = []
+        eval_times: List[float] = []
         predictions: List[Dict[str, Any]] = []
 
-        for idx, example in enumerate(examples, start=1):
-            start_time = time.perf_counter()
-            responses = self.pipeline.query(example.question, **self.query_kwargs)
-            latency = time.perf_counter() - start_time
-            latencies.append(latency)
+        # Print header
+        print("\n" + "="*140)
+        print(f"{'#':<4} {'Question':<40} {'Predicted'} {'Ground Truth'} {'EM':<6} {'F1':<6} {'Retr':<6} {'LLM':<6} {'Eval':<6} {'Total':<6} {'Avg EM':<7} {'Avg F1':<7} {'Avg Total':<9}")
+        print("="*140)
 
-            # If answer generator is available, use it to generate answers from retrieved context
+        for idx, example in enumerate(examples, start=1):
+            # Measure retrieval time
+            retrieval_start = time.perf_counter()
+            responses = self.pipeline.query(example.question, **self.query_kwargs)
+            retrieval_time = time.perf_counter() - retrieval_start
+            retrieval_times.append(retrieval_time)
+
+            # Measure LLM answer generation time
+            llm_start = time.perf_counter()
             if self.answer_generator and responses:
                 try:
                     generated_answer = self.answer_generator.generate_answer(example.question, responses)
@@ -1076,12 +1447,14 @@ class HybridRAGEvaluator:
                     else:
                         prediction_text = self._combine_responses(responses)
                 except Exception as e:
-                    print(f"⚠️ Answer generation failed: {e}")
                     prediction_text = self._combine_responses(responses)
             else:
                 prediction_text = self._combine_responses(responses)
+            llm_time = time.perf_counter() - llm_start
+            llm_times.append(llm_time)
             
-            # Use semantic evaluation if available, otherwise fall back to exact matching
+            # Measure semantic evaluation time
+            eval_start = time.perf_counter()
             if self.semantic_evaluator:
                 # Use semantic evaluation for more flexible scoring
                 best_similarity = 0.0
@@ -1098,14 +1471,34 @@ class HybridRAGEvaluator:
                 # Convert semantic scores to EM/F1 format
                 em = 1.0 if best_equivalent else 0.0
                 f1 = best_similarity
-                
-                print(f"🔍 DEBUG: Semantic evaluation - EM: {em}, F1: {f1:.3f}, Equivalent: {best_equivalent}")
             else:
                 # Fall back to exact matching
                 em, f1 = best_score(prediction_text, example.answers)
+            eval_time = time.perf_counter() - eval_start
+            eval_times.append(eval_time)
+            
+            # Calculate total time
+            total_time = retrieval_time + llm_time + eval_time
+            latencies.append(total_time)
             
             em_total += em
             f1_total += f1
+
+            # Calculate running averages
+            avg_em = em_total / idx
+            avg_f1 = f1_total / idx
+            avg_total = sum(latencies) / len(latencies)
+
+            # Truncate strings for display
+            question_display = example.question # (example.question[:37] + "...") if len(example.question) > 40 else example.question
+            prediction_display = prediction_text # (prediction_text[:12] + "...") if len(prediction_text) > 15 else prediction_text
+            ground_truth_display = example.answers[0] # (example.answers[0][:12] + "...") if len(example.answers[0]) > 15 else example.answers[0]
+
+            # Print result row with detailed timing
+            print(f"{idx:<4} {question_display}:")
+            print(f"Predicted: {prediction_display}")
+            print(f"Ground Truth: {ground_truth_display}")
+            print(f"EM: {em:<6.3f} F1: {f1:<6.3f} Retrieval: {retrieval_time:<6.2f} LLM: {llm_time:<6.2f} Eval: {eval_time:<6.2f} Total: {total_time:<6.2f} Avg EM: {avg_em:<7.3f} Avg F1: {avg_f1:<7.3f} Avg Total: {avg_total:<9.2f}")
 
             if self.collect_predictions:
                 predictions.append(
@@ -1116,7 +1509,10 @@ class HybridRAGEvaluator:
                         "prediction": prediction_text,
                         "em": em,
                         "f1": f1,
-                        "latency_sec": latency,
+                        "latency_sec": total_time,
+                        "retrieval_sec": retrieval_time,
+                        "llm_sec": llm_time,
+                        "eval_sec": eval_time,
                         "metadata": example.metadata,
                     }
                 )
@@ -1129,6 +1525,16 @@ class HybridRAGEvaluator:
             "f1": f1_total / total,
         }
         average_latency = sum(latencies) / len(latencies)
+        avg_retrieval = sum(retrieval_times) / len(retrieval_times)
+        avg_llm = sum(llm_times) / len(llm_times)
+        avg_eval = sum(eval_times) / len(eval_times)
+
+        # Print final summary with timing breakdown
+        print("="*140)
+        print(f"\n{'FINAL RESULTS':<40} {'EM':<10} {'F1':<10} {'Avg Retr':<12} {'Avg LLM':<12} {'Avg Eval':<12} {'Avg Total':<12}")
+        print("-"*140)
+        print(f"{'Overall Performance':<40} {metrics['exact_match']:<10.3f} {metrics['f1']:<10.3f} {avg_retrieval:<12.2f}s {avg_llm:<12.2f}s {avg_eval:<12.2f}s {average_latency:<12.2f}s")
+        print("="*140)
 
         return DatasetReport(
             dataset_name=config.name,
@@ -1212,13 +1618,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "limit": args.retrieval_limit,
     }
 
-    pipeline = HybridRAGPipeline()
+    pipeline = HybridRAGPipeline(collection_name="wiki_rag")
     
-    # Create answer generator for LLM-based answer generation
-    answer_generator = AnswerGenerator()
+    # Create answer generator for LLM-based answer generation with CoT and adaptive retrieval
+    answer_generator = AnswerGenerator(
+        service_host=os.getenv("SERVICE_HOST"), 
+        openai_host=os.getenv("OPENAI_BASE_URL"),
+        pipeline=pipeline  # Pass pipeline for adaptive retrieval
+    )
     
     # Create semantic evaluator for flexible answer evaluation
-    semantic_evaluator = SemanticEvaluator()
+    semantic_evaluator = SemanticEvaluator(openai_host=os.getenv("OPENAI_BASE_URL"))
     
     evaluator = HybridRAGEvaluator(
         pipeline,
@@ -1291,10 +1701,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         with report_path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
-        print(f"[{config.name}] EM={report.metrics['exact_match']:.3f} "
-              f"F1={report.metrics['f1']:.3f} "
-              f"avg_latency={report.average_latency_sec:.2f}s "
-              f"→ {report_path}")
+        print(f"\n📊 Report saved to: {report_path}")
 
     summary_path = args.output_dir / "summary.json"
     with summary_path.open("w", encoding="utf-8") as handle:

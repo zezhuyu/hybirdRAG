@@ -41,7 +41,7 @@ schema.add_function(bm25_function)
 index_params.add_index(
     field_name="sparse",
     index_type="SPARSE_INVERTED_INDEX",
-    metric_type="IP",
+    metric_type="BM25",
     params={
         "inverted_index_algo": "DAAT_MAXSCORE",
         "bm25_k1": 1.2,

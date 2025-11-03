@@ -101,9 +101,14 @@ def clear_milvus_collection(collection_name: str = "vector_rag") -> Dict[str, An
         result["error"] = str(e)
         return result
 
-def clear_neo4j_database() -> Dict[str, Any]:
+def clear_neo4j_database(collection_name: Optional[str] = None) -> Dict[str, Any]:
     """
-    Clear all data from the Neo4j database.
+    Clear data from the Neo4j database.
+    
+    Args:
+        collection_name: Optional collection name to filter deletion. 
+                        If provided, only deletes nodes with matching collection property.
+                        If None, deletes ALL data in the database.
     
     Returns:
         dict: Result information with success status and details
@@ -112,7 +117,8 @@ def clear_neo4j_database() -> Dict[str, Any]:
         "success": False,
         "deleted_nodes": 0,
         "deleted_relationships": 0,
-        "error": None
+        "error": None,
+        "collection": collection_name
     }
     
     try:
@@ -137,19 +143,51 @@ def clear_neo4j_database() -> Dict[str, Any]:
         driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_username, neo4j_password))
         
         with driver.session(database=neo4j_database) as session:
-            # Get count of nodes and relationships before clearing
-            result_query = session.run("MATCH (n) RETURN count(n) as node_count")
-            node_count = result_query.single()["node_count"]
-            
-            result_query = session.run("MATCH ()-[r]->() RETURN count(r) as rel_count")
-            rel_count = result_query.single()["rel_count"]
-            
-            # Clear all data
-            session.run("MATCH (n) DETACH DELETE n")
-            
-            # Verify deletion
-            result_query = session.run("MATCH (n) RETURN count(n) as remaining_nodes")
-            remaining = result_query.single()["remaining_nodes"]
+            # Build query based on whether collection filter is provided
+            if collection_name:
+                # Delete only nodes with matching collection property
+                count_query = "MATCH (n) WHERE n.collection = $collection RETURN count(n) as node_count"
+                rel_count_query = """
+                    MATCH (n)-[r]->(m) 
+                    WHERE n.collection = $collection OR m.collection = $collection 
+                    RETURN count(r) as rel_count
+                """
+                delete_query = "MATCH (n) WHERE n.collection = $collection DETACH DELETE n"
+                verify_query = "MATCH (n) WHERE n.collection = $collection RETURN count(n) as remaining_nodes"
+                
+                # Get count of nodes and relationships before clearing
+                result_query = session.run(count_query, collection=collection_name)
+                node_count = result_query.single()["node_count"]
+                
+                result_query = session.run(rel_count_query, collection=collection_name)
+                rel_count = result_query.single()["rel_count"]
+                
+                # Clear data for this collection
+                session.run(delete_query, collection=collection_name)
+                
+                # Verify deletion
+                result_query = session.run(verify_query, collection=collection_name)
+                remaining = result_query.single()["remaining_nodes"]
+            else:
+                # Delete ALL data in the database
+                count_query = "MATCH (n) RETURN count(n) as node_count"
+                rel_count_query = "MATCH ()-[r]->() RETURN count(r) as rel_count"
+                delete_query = "MATCH (n) DETACH DELETE n"
+                verify_query = "MATCH (n) RETURN count(n) as remaining_nodes"
+                
+                # Get count of nodes and relationships before clearing
+                result_query = session.run(count_query)
+                node_count = result_query.single()["node_count"]
+                
+                result_query = session.run(rel_count_query)
+                rel_count = result_query.single()["rel_count"]
+                
+                # Clear all data
+                session.run(delete_query)
+                
+                # Verify deletion
+                result_query = session.run(verify_query)
+                remaining = result_query.single()["remaining_nodes"]
             
             if remaining == 0:
                 result["success"] = True
@@ -185,7 +223,8 @@ def clear_all_databases(collection_name: str = "vector_rag", skip_neo4j_on_auth_
     milvus_result = clear_milvus_collection(collection_name)
     
     # Clear Neo4j (with optional skip on auth failure)
-    neo4j_result = clear_neo4j_database()
+    # Pass collection_name to only clear nodes belonging to this collection
+    neo4j_result = clear_neo4j_database(collection_name=collection_name)
     
     # If Neo4j failed due to authentication and we should skip it, consider it successful
     if (skip_neo4j_on_auth_failure and 
@@ -305,7 +344,7 @@ def example_usage():
     
     # Example: Clear only Milvus
     print("\n🗑️  Clearing Milvus collection...")
-    milvus_result = clear_milvus_collection("vector_rag")
+    milvus_result = clear_milvus_collection("musique_rag")
     if milvus_result["success"]:
         print(f"✅ Cleared {milvus_result['deleted_count']} entities from Milvus")
     else:
@@ -313,7 +352,7 @@ def example_usage():
     
     # Example: Clear all databases
     print("\n🗑️  Clearing all databases...")
-    all_result = clear_all_databases("vector_rag")
+    all_result = clear_all_databases("musique_rag")
     if all_result["success"]:
         print("✅ All databases cleared successfully!")
     else:
