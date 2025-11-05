@@ -182,6 +182,12 @@ class HybridRAGPipeline:
             milvus_client=self.milvus,  # Pass the Milvus client for syncing
         )
 
+        # Check if GraphRAG is enabled via environment variable
+        # Set GRAPHRAG_ENABLED=false to disable GraphRAG for testing
+        self.graphrag_enabled = os.getenv("GRAPHRAG_ENABLED", "true").lower() == "true"
+        if not self.graphrag_enabled:
+            print("⚠️  GraphRAG is DISABLED via GRAPHRAG_ENABLED environment variable")
+
         self.splitter = SentenceSplitter(
             chunk_size=splitter_chunk_size,
             chunk_overlap=splitter_overlap,
@@ -965,15 +971,17 @@ Now analyze the question above and respond with JSON only:"""
         vector_results = self.vector_rag.query(query_text, limit=limit)
         
         # Try to get graph answer, but handle gracefully if it fails
-        try:
-            # GraphRAG query expects a list of strings - query_text is already a list
-            graph_answer = self.graph_rag.query(query_text)
-            # Only include graph answer if it's not empty
-            if not graph_answer or (isinstance(graph_answer, list) and not any(g.strip() for g in graph_answer)):
+        graph_answer = None
+        if self.graphrag_enabled:
+            try:
+                # GraphRAG query expects a list of strings - query_text is already a list
+                graph_answer = self.graph_rag.query(query_text)
+                # Only include graph answer if it's not empty
+                if not graph_answer or (isinstance(graph_answer, list) and not any(g.strip() for g in graph_answer)):
+                    graph_answer = None
+            except Exception as e:
+                print(f"⚠️  GraphRAG query failed: {e}")
                 graph_answer = None
-        except Exception as e:
-            print(f"⚠️  GraphRAG query failed: {e}")
-            graph_answer = None
 
         # Handle HybridHits objects from Milvus
         vector_texts = []
@@ -1063,11 +1071,13 @@ Now analyze the question above and respond with JSON only:"""
         if vector_docs:
             self.vector_rag.add_document(vector_docs)
 
-        graph_nodes = self._build_graph_nodes(text, metadata)
-        if graph_nodes:
-            self.graph_rag.build_index(graph_nodes)
-            # 🚀 For single documents, use smart rebuilding to avoid unnecessary work
-            self._rebuild_communities_if_needed()
+        # Add to GraphRAG only if enabled
+        if self.graphrag_enabled:
+            graph_nodes = self._build_graph_nodes(text, metadata)
+            if graph_nodes:
+                self.graph_rag.build_index(graph_nodes)
+                # 🚀 For single documents, use smart rebuilding to avoid unnecessary work
+                self._rebuild_communities_if_needed()
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         all_vector_docs: List[Dict[str, Any]] = []
@@ -1084,12 +1094,15 @@ Now analyze the question above and respond with JSON only:"""
                 for chunk in self.late_chunker.chunk_document(text)
                 # for chunk in self.hybrid_chunker.chunk_document(text)
             )
-            all_nodes.extend(self._build_graph_nodes(text, metadata))
+            # Build graph nodes only if GraphRAG is enabled
+            if self.graphrag_enabled:
+                all_nodes.extend(self._build_graph_nodes(text, metadata))
 
         if all_vector_docs:
             self.vector_rag.add_document(all_vector_docs)
 
-        if all_nodes:
+        # Add to GraphRAG only if enabled
+        if self.graphrag_enabled and all_nodes:
             self.graph_rag.build_index(all_nodes)
             # 🚀 Generate communities immediately during document loading (not query time!)
             self.graph_rag.build_communities()

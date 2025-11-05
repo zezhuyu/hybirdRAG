@@ -433,10 +433,6 @@ class GraphRAGPipeline:
     def build_index(self, nodes: List[BaseNode]) -> PropertyGraphIndex:
         if not nodes:
             raise ValueError("No nodes supplied for index construction.")
-
-        # Process nodes with efficient batch processing
-        print(f"🔄 Extracting entities from {len(nodes)} nodes...")
-        
         # Use smaller batches for better performance and error handling
         batch_size = 20  # Increased batch size for efficiency
         processed_nodes = []
@@ -447,17 +443,13 @@ class GraphRAGPipeline:
             batch_num = i // batch_size + 1
             
             try:
-                print(f"🔄 Processing batch {batch_num}/{total_batches} ({len(batch)} nodes)...")
                 batch_processed = self.kg_extractor(batch, show_progress=False)
                 processed_nodes.extend(batch_processed)
-                print(f"✅ Batch {batch_num} completed")
                 
             except Exception as batch_error:
                 print(f"⚠️ Batch {batch_num} failed: {batch_error}")
                 print(f"🔄 Using original nodes for batch {batch_num}...")
                 processed_nodes.extend(batch)  # Use original nodes as fallback
-        
-        print(f"✅ Entity extraction completed: {len(processed_nodes)} nodes processed")
 
         if self.index is None:
             # Ensure entities are properly processed before creating the index
