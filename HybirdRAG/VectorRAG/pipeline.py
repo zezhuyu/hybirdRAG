@@ -7,7 +7,7 @@ import schedule
 import asyncio
 
 from comp import MLModelClient
-from langchain.schema import Document
+from langchain_core.documents import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.embeddings import BaseEmbedding
 from .text_processing import Formatter

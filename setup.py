@@ -15,15 +15,16 @@ def read_requirements():
     else:
         # Default requirements for the entire project
         requirements = [
-            "grpcio>=1.75.0",
-            "grpcio-tools>=1.75.0", 
-            "protobuf>=6.0.0",
+            "grpcio>=1.70.0",
+            "grpcio-tools>=1.70.0", 
+            "protobuf>=4.21.0",
             "pymilvus>=2.4.0",
             "spacy>=3.7.0",
             "langchain>=0.1.0",
             "llama-index>=0.10.0",
             "llama-index-core>=0.10.0",
             "llama-index-embeddings-openai>=0.1.0",
+            "neo4j>=6.0.0",
             "schedule>=1.2.0",
             "pypdf>=3.17.0",
             "pytesseract>=0.3.10",
