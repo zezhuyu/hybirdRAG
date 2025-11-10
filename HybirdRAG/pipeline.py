@@ -192,9 +192,8 @@ class HybridRAGPipeline:
             chunk_size=splitter_chunk_size,
             chunk_overlap=splitter_overlap,
         )
-        self.late_chunker = LateChunker()
+        self.chunker = HybridChunker(embedding_client=OpenAIEmbeddingClient(self.openai))  # Default chunker, can be overridden
         self.context_chunker = ContextualChunker()
-        self.hybrid_chunker = HybridChunker(embedding_client=OpenAIEmbeddingClient(self.openai))
 
     def _broaden_query_with_retry(self, query_text: str, retry_limit: int = 3) -> Optional[List[str]]:
         """Broaden query with retry mechanism for better reliability."""
@@ -932,8 +931,9 @@ Now analyze the question above and respond with JSON only:"""
 
         # LLM-based query expansion for ambiguous queries
         # This runs before traditional broadening to improve initial retrieval
+        # Controlled by broaden_query flag
         llm_expanded = False
-        if isinstance(query_text, str):
+        if broaden_query and isinstance(query_text, str):
             expanded_queries = self._expand_query_llm(query_text)
             if len(expanded_queries) > 1:
                 # LLM generated multiple queries - use them
@@ -1065,8 +1065,7 @@ Now analyze the question above and respond with JSON only:"""
 
         vector_docs = [
             {**metadata, "content": chunk}
-            for chunk in self.late_chunker.chunk_document(text)
-            # for chunk in self.hybrid_chunker.chunk_document(text)
+            for chunk in self.chunker.chunk_document(text)
         ]
         if vector_docs:
             self.vector_rag.add_document(vector_docs)
@@ -1091,8 +1090,7 @@ Now analyze the question above and respond with JSON only:"""
 
             all_vector_docs.extend(
                 {**metadata, "content": chunk}
-                for chunk in self.late_chunker.chunk_document(text)
-                # for chunk in self.hybrid_chunker.chunk_document(text)
+                for chunk in self.chunker.chunk_document(text)
             )
             # Build graph nodes only if GraphRAG is enabled
             if self.graphrag_enabled:

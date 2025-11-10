@@ -249,7 +249,7 @@ def main():
         batch_num = (i // batch_size) + 1
         total_batches = (total_docs + batch_size - 1) // batch_size
 
-        if batch_num < 123:
+        if batch_num < 999:
             continue
         
         print(f"📦 Processing batch {batch_num}/{total_batches} ({len(batch)} documents)...")

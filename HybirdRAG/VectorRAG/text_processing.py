@@ -1,4 +1,5 @@
 import spacy
+import re
 from typing import List, Dict, Optional
 from datetime import datetime
 from llama_index.core import Document
@@ -139,6 +140,170 @@ class LateChunker:
             chunks.append(" ".join(buffer))
         
         return chunks
+
+
+class HardTokenChunker:
+    """
+    Chunker that splits text by hard token limit.
+    Splits at word boundaries when token limit is reached, without overlap.
+    """
+    
+    def __init__(self, max_tokens: int = 512):
+        """
+        Args:
+            max_tokens: Maximum number of tokens per chunk (approximated by whitespace split).
+        """
+        self.max_tokens = max_tokens
+    
+    def chunk_document(self, text: str) -> List[str]:
+        """
+        Split document into chunks by hard token limit.
+        
+        Args:
+            text: Input text to chunk
+            
+        Returns:
+            List of text chunks, each containing at most max_tokens tokens
+        """
+        if not text or not text.strip():
+            return []
+        
+        # Split text into words (tokens approximated by whitespace)
+        words = text.split()
+        
+        if len(words) <= self.max_tokens:
+            return [text]
+        
+        chunks = []
+        current_chunk = []
+        current_token_count = 0
+        
+        for word in words:
+            # Check if adding this word would exceed token limit
+            if current_token_count + 1 > self.max_tokens:
+                # Flush current chunk
+                if current_chunk:
+                    chunks.append(" ".join(current_chunk))
+                    current_chunk = []
+                    current_token_count = 0
+            
+            current_chunk.append(word)
+            current_token_count += 1
+        
+        # Add remaining chunk
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        
+        return chunks
+
+
+class PunctuationChunker:
+    """
+    Chunker that splits text by punctuation marks (sentence boundaries).
+    Splits at sentence-ending punctuation (., !, ?) and groups sentences into chunks
+    based on token count (similar to HardTokenChunker but respects sentence boundaries).
+    """
+    
+    def __init__(self, max_tokens: int = 512, min_tokens: int = 10, max_chunk_length: int = None, min_chunk_length: int = None):
+        """
+        Args:
+            max_tokens: Maximum tokens (words) per chunk (primary limit)
+            min_tokens: Minimum tokens (words) per chunk (to avoid very small chunks)
+            max_chunk_length: DEPRECATED - Maximum characters per chunk (kept for backward compatibility)
+            min_chunk_length: DEPRECATED - Minimum characters per chunk (kept for backward compatibility)
+        
+        Note: If max_chunk_length is provided, it will be used for backward compatibility,
+        but max_tokens is preferred for consistency with HardTokenChunker.
+        """
+        # Support both token-based and character-based (for backward compatibility)
+        if max_chunk_length is not None:
+            # Backward compatibility: convert character limit to approximate token limit
+            # Rough estimate: 5 characters per word on average
+            self.max_tokens = max_tokens if max_tokens != 512 else max_chunk_length // 5
+            self.min_tokens = min_tokens if min_tokens != 10 else (min_chunk_length or 50) // 5
+        else:
+            self.max_tokens = max_tokens
+            self.min_tokens = min_tokens
+    
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens by splitting on whitespace (same as HardTokenChunker)."""
+        return len(text.split())
+    
+    def chunk_document(self, text: str) -> List[str]:
+        """
+        Split document into chunks by punctuation marks (sentence boundaries).
+        Groups sentences into chunks based on token count.
+        
+        Args:
+            text: Input text to chunk
+            
+        Returns:
+            List of text chunks split at sentence boundaries, each containing at most max_tokens tokens
+        """
+        if not text or not text.strip():
+            return []
+        
+        # Count tokens in full text
+        total_tokens = self._count_tokens(text)
+        
+        # If text has fewer tokens than max_tokens, return as single chunk
+        if total_tokens <= self.max_tokens:
+            return [text.strip()]
+        
+        # Use nltk sentence tokenizer to split by sentence-ending punctuation
+        sentences = nltk.sent_tokenize(text)
+        
+        # Group sentences into chunks respecting max_tokens
+        chunks = []
+        current_chunk = []
+        current_token_count = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # Count tokens in this sentence
+            sentence_tokens = self._count_tokens(sentence)
+            
+            # Check if adding this sentence would exceed max_tokens
+            if current_token_count + sentence_tokens > self.max_tokens:
+                # Flush current chunk if it meets minimum token requirement
+                if current_chunk and current_token_count >= self.min_tokens:
+                    chunks.append(" ".join(current_chunk).strip())
+                    current_chunk = [sentence]
+                    current_token_count = sentence_tokens
+                else:
+                    # If current chunk is too small, append to it anyway
+                    # (but only if it won't exceed max_tokens significantly)
+                    if current_token_count + sentence_tokens <= self.max_tokens * 1.5:
+                        current_chunk.append(sentence)
+                        current_token_count += sentence_tokens
+                    else:
+                        # Force flush even if small to avoid extremely large chunks
+                        if current_chunk:
+                            chunks.append(" ".join(current_chunk).strip())
+                        current_chunk = [sentence]
+                        current_token_count = sentence_tokens
+            else:
+                # Add sentence to current chunk
+                current_chunk.append(sentence)
+                current_token_count += sentence_tokens
+        
+        # Add final chunk
+        if current_chunk:
+            chunks.append(" ".join(current_chunk).strip())
+        
+        # Filter out chunks that are too small (unless it's the only chunk)
+        if len(chunks) > 1:
+            chunks = [chunk for chunk in chunks if self._count_tokens(chunk) >= self.min_tokens]
+        
+        # If no chunks meet minimum token requirement, return at least one chunk
+        if not chunks:
+            return [text.strip()]
+        
+        return chunks
+
 
 class HybridChunker:
     """
@@ -339,3 +504,5 @@ class HybridChunker:
                 all_chunks.extend(refined_chunks)
 
         return all_chunks
+
+
