@@ -153,6 +153,18 @@ class VectorRAGPipeline:
         # This gives us better coverage across all query terms
         query_embedding = self.embedding.embed_batch(query_list)
         
+        # Fallback to individual embeddings if batch fails
+        if query_embedding is None:
+            print("⚠️  Batch embedding failed, falling back to individual embeddings")
+            query_embedding = [self.embedding.embed_sentence(q) for q in query_list]
+            # For hybrid search, we need a single combined embedding
+            # Average the embeddings if multiple queries
+            if len(query_embedding) > 1:
+                import numpy as np
+                query_embedding = [np.mean(query_embedding, axis=0).tolist()]
+            else:
+                query_embedding = query_embedding
+        
         search_params = {
             "output_fields": ["id", "content", "add_at", "chapter", "section"]
         }

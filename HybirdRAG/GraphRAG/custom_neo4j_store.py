@@ -139,6 +139,14 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
         # Sanitize the label for Neo4j (replace spaces and special chars with underscores)
         sanitized_label = self._sanitize_label(node.label)
         
+        properties = node.properties or {}
+        params = {
+            "name": node.name,
+            "description": properties.get("entity_description", ""),
+            "properties": json.dumps(properties),
+            "original_label": node.label  # Store original label as property
+        }
+        
         # Create or update the node with the proper label and collection tag
         if self._collection_name:
             query = f"""
@@ -148,6 +156,7 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
                 n.original_label = $original_label,
                 n.collection = $collection
             """
+            params["collection"] = self._collection_name
         else:
             query = f"""
             MERGE (n:{sanitized_label} {{name: $name}})
@@ -155,17 +164,6 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
                 n.properties = $properties,
                 n.original_label = $original_label
             """
-        
-        properties = node.properties or {}
-        params = {
-            "name": node.name,
-            "description": properties.get("entity_description", ""),
-            "properties": json.dumps(properties),
-            "original_label": node.label  # Store original label as property
-        }
-        
-        if self._collection_name:
-            params["collection"] = self._collection_name
         
         self._session.run(query, **params)
     

@@ -35,7 +35,8 @@ class OpenAIEmbeddingClient:
             return [data.embedding for data in response.data]
         except Exception as e:
             print(f"⚠️  Batch embedding failed, using individual calls: {e}")
-            return None
+            # Fallback to individual embeddings instead of returning None
+            return [self.embed_sentence(s) for s in sentences]
 
     def embed_batch(self, sentences: List[str]) -> List[List[float]]:
         try:
@@ -46,4 +47,5 @@ class OpenAIEmbeddingClient:
             return [data.embedding for data in response.data]
         except Exception as e:
             print(f"⚠️  Batch embedding failed, using individual calls: {e}")
-            return None
+            # Fallback to individual embeddings instead of returning None
+            return [self.embed_sentence(s) for s in sentences]

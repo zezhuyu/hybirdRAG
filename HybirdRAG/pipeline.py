@@ -1027,14 +1027,22 @@ Now analyze the question above and respond with JSON only:"""
 
         if rerank and vector_texts:
             # Ensure query_text is a string for rerank
-            rerank_query = query_text if isinstance(query_text, str) else " ".join(query_text) if isinstance(query_text, list) else str(query_text)
-            # Use more aggressive reranking with higher limits
+            rerank_query = (
+                query_text
+                if isinstance(query_text, str)
+                else " ".join(query_text)
+                if isinstance(query_text, list)
+                else str(query_text)
+            )
             try:
                 reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
-                # Only use reranked results if we got any, otherwise fallback to original
                 if reranked_texts and len(reranked_texts) > 0:
-                    # Update results if we used vector_texts
-                    if not (graph_answer is not None and isinstance(graph_answer, str) and graph_answer.strip() and "No relevant information found" not in graph_answer):
+                    if not (
+                        graph_answer is not None
+                        and isinstance(graph_answer, str)
+                        and graph_answer.strip()
+                        and "No relevant information found" not in graph_answer
+                    ):
                         results = reranked_texts
                 else:
                     print("⚠️  Warning: Reranking returned empty results, using original vector texts")
