@@ -7,7 +7,7 @@ import schedule
 import asyncio
 
 from comp import MLModelClient
-from langchain.schema import Document
+from langchain_core.documents import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.embeddings import BaseEmbedding
 from .text_processing import Formatter
@@ -151,7 +151,14 @@ class VectorRAGPipeline:
         
         # For multiple queries, we'll combine them into a single embedding
         # This gives us better coverage across all query terms
-        query_embedding = self.embedding.embed_batch(query_list)
+        try:
+            query_embedding = self.embedding.embed_batch(query_list)
+            if query_embedding is None or len(query_embedding) == 0:
+                print("⚠️  Embedding generation failed, returning empty results")
+                return []
+        except Exception as e:
+            print(f"⚠️  Embedding generation error: {e}")
+            return []
         
         # Fallback to individual embeddings if batch fails
         if query_embedding is None:
@@ -200,3 +207,20 @@ class VectorRAGPipeline:
         except Exception as e:
             print(f"Vector search failed: {e}")
             # Fallback to simple vector search
+            try:
+                if query_embedding is not None:
+                    results = self.milvus.search(
+                        collection_name=self.collection_name,
+                        data=query_embedding,
+                        anns_field="vector",
+                        param={"metric_type": "COSINE"},
+                        limit=limit,
+                        **search_params
+                    )
+                    return self._deduplicate_results(results)
+                else:
+                    print("⚠️  Query embedding is None, returning empty results")
+                    return []
+            except Exception as fallback_e:
+                print(f"⚠️  Fallback vector search also failed: {fallback_e}")
+                return []

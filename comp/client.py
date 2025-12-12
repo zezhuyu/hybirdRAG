@@ -128,10 +128,24 @@ class MLModelClient:
     def rerank_documents(self, documents: List[str], query: str) -> List[str]:
         def _call():
             response = self.stub.RerankDocuments(pb2.RerankDocumentsRequest(documents=documents, query=query))
-            if not response.scores:
-                print(f"⚠️  Warning: Rerank response has no scores")
+            if not response.scores or len(response.scores) == 0:
+                # Silently return original documents if reranking isn't working
+                # Only print warning once per client instance
+                if not hasattr(self, '_rerank_warning_shown'):
+                    print(f"⚠️  Warning: Rerank service not returning scores, using original document order")
+                    self._rerank_warning_shown = True
                 return documents  # Return original documents if no scores
-            sorted_docs = sorted([{'doc': doc, 'score': score} for doc, score in zip(documents, response.scores)], key=lambda x: x['score'], reverse=True)
+            
+            # Check if we have valid scores
+            if len(response.scores) != len(documents):
+                if not hasattr(self, '_rerank_mismatch_warning_shown'):
+                    print(f"⚠️  Warning: Rerank scores count mismatch (got {len(response.scores)}, expected {len(documents)})")
+                    self._rerank_mismatch_warning_shown = True
+                return documents
+            
+            # Sort documents by scores (higher scores first)
+            sorted_docs = sorted([{'doc': doc, 'score': score} for doc, score in zip(documents, response.scores)], 
+                               key=lambda x: x['score'], reverse=True)
             return [item['doc'] for item in sorted_docs]
         
         return retry_with_backoff(
