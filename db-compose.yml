@@ -55,6 +55,8 @@ services:
     ports:
       - "19530:19530"
       - "9091:9091"
+    networks:
+      - db-network
     depends_on:
       - "etcd"
       - "minio"
@@ -68,6 +70,8 @@ services:
         - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/plugins:/plugins
     environment:
         - NEO4J_AUTH=neo4j/GraphRAG
+    networks:
+      - db-network
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -75,4 +79,4 @@ services:
 
 networks:
   default:
-    name: milvus
+    name: db-network

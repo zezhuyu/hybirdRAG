@@ -1,0 +1,27 @@
+services:
+  hybridrag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8000:8000
+    environment:
+      - SERVICE_HOST=ml_grpc_server:50051
+      - MILVUS_HOST=milvus:19530
+      - OPENAI_BASE_URL=https://api.openai.com/v1
+      - OPENAI_API_KEY=your_openai_api_key_here
+      - PROMPT_REWRITE_MODEL=qwen3:0.6b
+      - EMBEDDING_MODEL_NAME=bge-m3:latest
+      - RERANKER_MODEL_NAME=ai/qwen3-reranker-vllm:0.6B
+      - GRAPH_CREATE_MODEL=gpt-oss:latest
+      - NEO4J_HOST=localhost
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=password
+      - NEO4J_DATABASE=neo4j  
+      - GRAPHRAG_ENABLED=True
+    networks:
+      - db-network
+
+networks:
+  db-network:
+    external: true

@@ -1,0 +1,6 @@
+*.yml
+.*
+docker/*
+evaluation/*
+example.py
+README.md
