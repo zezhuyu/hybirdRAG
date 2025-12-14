@@ -11,7 +11,7 @@ from llama_index.core.llms import (
 )
 from llama_index.core.embeddings import BaseEmbedding
 from openai import OpenAI
-from comp import MLModelClient
+from HybirdRAG.comp import MLModelClient
 from llama_index.core.embeddings import BaseEmbedding
 
 

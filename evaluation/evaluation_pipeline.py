@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from HybirdRAG.pipeline import HybridRAGPipeline
-from comp import MLModelClient
+from HybirdRAG.comp import MLModelClient
 from openai import OpenAI
 
 

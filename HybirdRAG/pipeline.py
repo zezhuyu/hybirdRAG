@@ -12,11 +12,11 @@ from .VectorRAG.pipeline import VectorRAGPipeline, DIMENSION
 from .VectorRAG.text_processing import ContextualChunker, LateChunker, HybridChunker
 
 from .GraphRAG.convertObj import OpenAILLMWrapper, MLModelEmbeddingWrapper, OpenAIEmbeddingsWrapper
-from .VectorRAG.convertObj import OpenAIEmbeddingClient
+from HybirdRAG.VectorRAG.convertObj import OpenAIEmbeddingClient, OpenAIRerankerClient
 from .GraphRAG.pipeline import GraphRAGPipeline
 from .GraphRAG.store import GraphRAGStore, NEO4J_AVAILABLE
 
-from comp import MLModelClient
+from HybirdRAG.comp import MLModelClient
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import TextNode
 
@@ -1035,7 +1035,13 @@ Now analyze the question above and respond with JSON only:"""
                 else str(query_text)
             )
             try:
-                reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
+                # Check if RERANKER_MODEL_NAME is set and not empty
+                reranker_model_name = os.getenv("RERANKER_MODEL_NAME", "").strip()
+                if reranker_model_name:
+                    reranker = OpenAIRerankerClient()
+                    reranked_texts = reranker.rerank_documents(vector_texts, rerank_query)
+                else:
+                    reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
                 if reranked_texts and len(reranked_texts) > 0:
                     if not (
                         graph_answer is not None
