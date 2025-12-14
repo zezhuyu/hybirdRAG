@@ -9,8 +9,8 @@ import os
 # Read the requirements
 def read_requirements():
     requirements = []
-    if os.path.exists("comp/requirements.txt"):
-        with open("comp/requirements.txt", "r") as f:
+    if os.path.exists("HybirdRAG/comp/requirements.txt"):
+        with open("HybirdRAG/comp/requirements.txt", "r") as f:
             requirements = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     else:
         # Default requirements for the entire project
@@ -62,7 +62,7 @@ setup(
     
     # Include package data
     package_data={
-        "comp": ["*.proto", "*.py"],
+        "HybirdRAG.comp": ["*.proto", "*.py"],
         "HybirdRAG": ["*.py"],
         "HybirdRAG.VectorRAG": ["*.py"],
         "HybirdRAG.GraphRAG": ["*.py"]

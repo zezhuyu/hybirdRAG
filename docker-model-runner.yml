@@ -1,0 +1,7 @@
+models:
+  llm:
+    model: ai/gpt-oss-vllm
+  embedding-model:
+    model: ai/qwen3-embedding-vllm
+  reranker-model:
+    model: ai/qwen3-reranker-vllm

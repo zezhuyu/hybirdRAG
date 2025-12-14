@@ -6,7 +6,7 @@ import time
 import schedule
 import asyncio
 
-from comp import MLModelClient
+from HybirdRAG.comp import MLModelClient
 from langchain_core.documents import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.embeddings import BaseEmbedding

@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     """Configuration for model loading and memory management"""
+    load_rewriter: bool = os.getenv("LOAD_REWRITER", "false").lower() == "true"
+    load_reranker: bool = os.getenv("LOAD_RERANKER", "false").lower() == "true"
+    load_embedding: bool = os.getenv("LOAD_EMBEDDING", "false").lower() == "true"
+    load_llmlingua: bool = os.getenv("LOAD_LLMLINGUA", "false").lower() == "true"
     rewriter_model_name: str = os.getenv("REWRITER_MODEL_NAME", "Qwen/Qwen3-0.6B")
     reranker_model_name: str = os.getenv("RERANKER_MODEL_NAME", "jinaai/jina-reranker-v2-base-multilingual")
     embedding_model_name: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
@@ -77,7 +81,8 @@ class ModelManager:
     
     def _load_embedding_model(self):
         """Lazy load embedding model"""
-        if 'embedding' not in self._models:
+        self._models['embedding'] = None
+        if self.config.load_embedding and 'embedding' not in self._models:
             logger.info("Loading embedding model: %s", self.config.embedding_model_name)
             self._models['embedding'] = BGEM3FlagModel(
                 self.config.embedding_model_name, 
@@ -89,7 +94,9 @@ class ModelManager:
     
     def _load_reranker_model(self):
         """Lazy load reranker model"""
-        if 'reranker' not in self._models:
+        self._models['reranker'] = None
+        self._models['reranker_tokenizer'] = None
+        if self.config.load_reranker and 'reranker' not in self._models:
             logger.info("Loading reranker model: %s", self.config.reranker_model_name)
             model = AutoModelForSequenceClassification.from_pretrained(
                 self.config.reranker_model_name,
@@ -110,7 +117,8 @@ class ModelManager:
     
     def _load_prompt_rewriter(self):
         """Lazy load prompt rewriter model"""
-        if 'prompt_rewriter' not in self._models:
+        self._models['prompt_rewriter'] = None
+        if self.config.load_rewriter and 'prompt_rewriter' not in self._models:
             logger.info("Loading prompt rewriter: %s", self.config.rewriter_model_name)
             
             tokenizer = AutoTokenizer.from_pretrained(self.config.rewriter_model_name)
@@ -136,7 +144,8 @@ class ModelManager:
     
     def _load_llm_lingua(self):
         """Lazy load LLMLingua compressor"""
-        if 'llm_lingua' not in self._models:
+        self._models['llm_lingua'] = None
+        if self.config.load_llmlingua and 'llm_lingua' not in self._models:
             logger.info("Loading LLMLingua: %s", self.config.llmlingua_model_name)
             self._models['llm_lingua'] = PromptCompressor(
                 model_name=self.config.llmlingua_model_name,
@@ -214,6 +223,9 @@ def embed_sentence(sentence: str) -> Optional[List[float]]:
         try:
             with model_manager._memory_context('embedding'):
                 embedding_model = model_manager._load_embedding_model()
+                if embedding_model is None:
+                    logger.error("Embedding model not loaded")
+                    return None
                 result = embedding_model.encode(sentence)['dense_vecs']
                 return result.tolist() if hasattr(result, 'tolist') else result
         except Exception as e:
@@ -234,7 +246,10 @@ def rerank_documents(documents: List[str], query: str) -> Optional[List[float]]:
         try:
             with model_manager._memory_context('reranker'):
                 reranker, tokenizer = model_manager._load_reranker_model()
-                
+
+                if reranker is None or tokenizer is None:
+                    logger.error("Reranker or tokenizer not loaded")
+                    return None
                 # Prepare sentence pairs
                 sentence_pairs = [[query, doc] for doc in documents]
                 
@@ -275,7 +290,10 @@ def rewrite_prompt(prompt: str, max_length: int = 16384, temperature: float = 0.
         try:
             with model_manager._memory_context('prompt_rewriter'):
                 pipeline_obj = model_manager._load_prompt_rewriter()
-                
+
+                if pipeline_obj is None:
+                    logger.error("Prompt rewriter not loaded")
+                    return None
                 result = pipeline_obj(
                     prompt,
                     max_length=max_length,
@@ -312,6 +330,9 @@ def compress_prompt(prompt: str, documents: List[str], rate: float = 0.33, force
         try:
             with model_manager._memory_context('llm_lingua'):
                 compressor = model_manager._load_llm_lingua()
+                if compressor is None:
+                    logger.error("LLMLingua not loaded")
+                    return None
                 result = compressor.compress_prompt(
                     documents, 
                     question=prompt, 

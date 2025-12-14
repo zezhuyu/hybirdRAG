@@ -1,30 +1,22 @@
 services:
   ml_grpc_server:
     build:
-      context: .
+      context: ./docker
       dockerfile: Dockerfile
+    restart: always
     ports:
       - 50051:50051
     environment:
+      - LOAD_REWRITER=false
+      - LOAD_RERANKER=true
+      - LOAD_EMBEDDING=false
+      - LOAD_LLMLINGUA=true
       - REWRITER_MODEL_NAME=Qwen/Qwen3-0.6B
       - RERANKER_MODEL_NAME=jinaai/jina-reranker-v2-base-multilingual
       - EMBEDDING_MODEL_NAME=BAAI/bge-m3
       - LLMLINGUA_MODEL_NAME=microsoft/llmlingua-2-xlm-roberta-large-meetingbank
       - MAX_MEMORY_GB=8.0
       - ENABLE_OFFLOADING=false
-      - EMBEDDING_INSTRUCTION="Represent the sentence for retrieval`:` "
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-  
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - 11434:11434
     deploy:
       resources:
         reservations:
