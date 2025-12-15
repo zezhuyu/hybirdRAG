@@ -78,5 +78,5 @@ services:
     restart: always
 
 networks:
-  default:
+  db-network:
     name: db-network
