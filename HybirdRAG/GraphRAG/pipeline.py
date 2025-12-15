@@ -451,18 +451,95 @@ class GraphRAGPipeline:
                 print(f"🔄 Using original nodes for batch {batch_num}...")
                 processed_nodes.extend(batch)  # Use original nodes as fallback
 
-        if self.index is None:
-            # Ensure entities are properly processed before creating the index
-            self._process_extracted_entities(processed_nodes)
-            
-            self.index = PropertyGraphIndex(
-                nodes=processed_nodes,
-                storage_context=self.storage_context,
-                property_graph_store=self.graph_store,  # Explicitly pass our custom store
-                show_progress=False,
-            )
-        else:
-            self.index.insert_nodes(processed_nodes)
+        # Wrap PropertyGraphIndex operations in thread pool to avoid asyncio.run() issues
+        # llama_index's PropertyGraphIndex might call asyncio.run() internally
+        import concurrent.futures
+        import asyncio
+        
+        def create_index_in_thread():
+            """Create PropertyGraphIndex in a thread with its own event loop."""
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                if self.index is None:
+                    # Ensure entities are properly processed before creating the index
+                    self._process_extracted_entities(processed_nodes)
+                    
+                    return PropertyGraphIndex(
+                        nodes=processed_nodes,
+                        storage_context=self.storage_context,
+                        property_graph_store=self.graph_store,  # Explicitly pass our custom store
+                        show_progress=False,
+                    )
+                else:
+                    self.index.insert_nodes(processed_nodes)
+                    return self.index
+            finally:
+                new_loop.close()
+        
+        # Check if we're in a running event loop (FastAPI context)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, PropertyGraphIndex might call asyncio.run() internally
+                # Run in a thread with its own event loop to avoid this
+                try:
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(create_index_in_thread)
+                        self.index = future.result()
+                except Exception as e:
+                    # If thread execution fails, catch and handle gracefully
+                    if "asyncio.run()" in str(e) or "event loop" in str(e).lower():
+                        print(f"⚠️ GraphRAG index creation failed due to event loop conflict: {e}")
+                        print("🔄 Skipping GraphRAG processing for this batch...")
+                        if self.index is None:
+                            print("⚠️ GraphRAG is disabled due to async context issues")
+                        return self.index
+                    else:
+                        raise
+            else:
+                # If loop exists but not running, try direct call first
+                try:
+                    if self.index is None:
+                        self._process_extracted_entities(processed_nodes)
+                        self.index = PropertyGraphIndex(
+                            nodes=processed_nodes,
+                            storage_context=self.storage_context,
+                            property_graph_store=self.graph_store,
+                            show_progress=False,
+                        )
+                    else:
+                        self.index.insert_nodes(processed_nodes)
+                except RuntimeError as e:
+                    # If that fails with asyncio error, use thread pool
+                    if "asyncio.run()" in str(e) or "event loop" in str(e).lower():
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(create_index_in_thread)
+                            self.index = future.result()
+                    else:
+                        raise
+        except RuntimeError:
+            # No event loop or other error, try direct call
+            try:
+                if self.index is None:
+                    self._process_extracted_entities(processed_nodes)
+                    self.index = PropertyGraphIndex(
+                        nodes=processed_nodes,
+                        storage_context=self.storage_context,
+                        property_graph_store=self.graph_store,
+                        show_progress=False,
+                    )
+                else:
+                    self.index.insert_nodes(processed_nodes)
+            except RuntimeError as e:
+                # If that fails, use thread pool as last resort
+                if "asyncio.run()" in str(e) or "event loop" in str(e).lower():
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(create_index_in_thread)
+                        self.index = future.result()
+                else:
+                    raise
+        
         return self.index
 
     def _process_extracted_entities(self, nodes: List[BaseNode]) -> None:

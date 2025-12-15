@@ -14,6 +14,19 @@ from typing import Dict, Any, List
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PROMPT_REWRITE_MODEL = os.getenv("PROMPT_REWRITE_MODEL")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME")
+RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL_NAME")
+GRAPH_CREATE_MODEL = os.getenv("GRAPH_CREATE_MODEL")
+
 # Load rest-server.py
 rest_server_path = Path(__file__).parent / "rest-server.py"
 rest_server_spec = importlib.util.spec_from_file_location("rest_server", rest_server_path)

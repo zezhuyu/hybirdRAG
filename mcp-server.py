@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any, List, Optional, Dict
 import json
 
+# Load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 # Add HybirdRAG to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -29,12 +33,29 @@ from clean import (
 # Global pipeline instance (initialized lazily)
 _pipeline: Optional[HybridRAGPipeline] = None
 
+# Job tracking for async document processing
+import uuid
+from datetime import datetime
+from enum import Enum
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+_jobs: Dict[str, Dict[str, Any]] = {}  # job_id -> job_info
+
 
 def get_pipeline() -> HybridRAGPipeline:
     """Get or create the HybridRAG pipeline instance."""
     global _pipeline
     if _pipeline is None:
         try:
+            # Ensure .env is loaded before creating pipeline (reload to ensure fresh values)
+            pipeline_env_path = Path(__file__).parent / ".env"
+            if pipeline_env_path.exists():
+                load_dotenv(pipeline_env_path, override=True)  # override=True ensures fresh values
             _pipeline = HybridRAGPipeline()
         except Exception as e:
             raise RuntimeError(f"Failed to initialize pipeline: {str(e)}") from e
@@ -214,6 +235,20 @@ def get_mcp_tools_dict() -> List[Dict[str, Any]]:
                 "type": "object",
                 "properties": {}
             }
+        },
+        {
+            "name": "get_job_status",
+            "description": "Get the status of an async document processing job. Use this to track the progress of add_documents operations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "The job ID returned from add_documents"
+                    }
+                },
+                "required": ["job_id"]
+            }
         }
     ]
 
@@ -221,6 +256,11 @@ def get_mcp_tools_dict() -> List[Dict[str, Any]]:
 # Tool handler function (exportable for HTTP API)
 async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Handle MCP tool calls. Returns dict with 'content' and 'isError' keys."""
+    import warnings
+    # Suppress RuntimeWarning about unawaited coroutines from llama_index
+    # This is a known issue in llama_index where some async methods are called without await
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*coroutine.*was never awaited.*")
+    
     try:
         if name == "add_document":
             content = arguments.get("content")
@@ -273,15 +313,77 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
                     doc_dict.update(doc["metadata"])
                 doc_list.append(doc_dict)
             
-            pipeline = get_pipeline()
-            pipeline.add_documents(doc_list)
+            # Create a job for tracking
+            job_id = str(uuid.uuid4())
+            job_info = {
+                "job_id": job_id,
+                "status": JobStatus.PENDING,
+                "count": len(doc_list),
+                "created_at": datetime.now().isoformat(),
+                "started_at": None,
+                "completed_at": None,
+                "error": None,
+                "progress": 0
+            }
+            _jobs[job_id] = job_info
             
+            # Process documents in background
+            pipeline = get_pipeline()
+            
+            async def add_docs_async():
+                """Run add_documents asynchronously."""
+                try:
+                    job_info["status"] = JobStatus.PROCESSING
+                    job_info["started_at"] = datetime.now().isoformat()
+                    job_info["progress"] = 10
+                    
+                    # Run in executor to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, pipeline.add_documents, doc_list)
+                    
+                    job_info["status"] = JobStatus.COMPLETED
+                    job_info["completed_at"] = datetime.now().isoformat()
+                    job_info["progress"] = 100
+                    print(f"add_documents success: {len(doc_list)} documents processed (job_id: {job_id})")
+                except Exception as e:
+                    job_info["status"] = JobStatus.FAILED
+                    job_info["completed_at"] = datetime.now().isoformat()
+                    job_info["error"] = str(e)
+                    print(f"add_documents error in background (job_id: {job_id}): {e}")
+            
+            # Schedule background task without waiting
+            asyncio.create_task(add_docs_async())
+            
+            # Return immediately with job ID
             return {
                 "content": [{"type": "text", "text": json.dumps({
                     "success": True,
-                    "message": f"Successfully added {len(doc_list)} documents",
+                    "message": f"Accepted {len(doc_list)} documents for processing",
+                    "job_id": job_id,
+                    "status": job_info["status"],
                     "count": len(doc_list)
                 }, indent=2)}],
+                "isError": False
+            }
+        
+        elif name == "get_job_status":
+            job_id = arguments.get("job_id")
+            if not job_id:
+                return {
+                    "content": [{"type": "text", "text": json.dumps({"error": "job_id is required"}, indent=2)}],
+                    "isError": True
+                }
+            
+            if job_id not in _jobs:
+                return {
+                    "content": [{"type": "text", "text": json.dumps({"error": f"Job {job_id} not found"}, indent=2)}],
+                    "isError": True
+                }
+            
+            job_info = _jobs[job_id].copy()
+            # Remove internal fields if needed
+            return {
+                "content": [{"type": "text", "text": json.dumps(job_info, indent=2)}],
                 "isError": False
             }
         
@@ -397,10 +499,16 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
             }
     
     except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        print("error", e)
+        print("Full traceback:")
+        print(error_traceback)
         return {
             "content": [{"type": "text", "text": json.dumps({
                 "error": str(e),
-                "type": type(e).__name__
+                "type": type(e).__name__,
+                "traceback": error_traceback
             }, indent=2)}],
             "isError": True
         }

@@ -92,6 +92,13 @@ class VectorRAGPipeline:
             # Add default values for required fields
             doc['chapter'] = doc.get('chapter', 0)
             doc['section'] = doc.get('section', 0)
+            doc['source'] = doc.get('source', 'unknown')
+            doc['source_path'] = doc.get('source_path', '')
+            doc['title'] = doc.get('title', '')
+            doc['page'] = doc.get('page', 0)
+            # Remove 'id' field if present - Milvus auto-generates IDs (auto_id=True)
+            if 'id' in doc:
+                del doc['id']
         self.milvus.insert(collection_name=self.collection_name, data=document)
 
     def _deduplicate_results(self, results):

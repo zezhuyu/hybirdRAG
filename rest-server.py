@@ -6,6 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
+# Load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 # Add HybirdRAG to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -35,6 +39,19 @@ app.add_middleware(
 
 # Global pipeline instance (initialized lazily)
 _pipeline: Optional[HybridRAGPipeline] = None
+
+# Job tracking for async document processing (shared with mcp-server)
+import uuid
+from datetime import datetime
+from enum import Enum
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+_jobs: Dict[str, Dict[str, Any]] = {}  # job_id -> job_info
 
 
 def get_pipeline() -> HybridRAGPipeline:
@@ -148,13 +165,22 @@ async def add_document(document: Document):
         ) from e
 
 
-@app.post("/api/v1/documents/batch", tags=["Documents"], status_code=http_status.HTTP_201_CREATED)
+@app.post("/api/v1/documents/batch", tags=["Documents"], status_code=http_status.HTTP_202_ACCEPTED)
 async def add_documents(request: DocumentsRequest):
     """
-    Add multiple documents to the RAG system in batch.
+    Add multiple documents to the RAG system in batch (async).
     
-    This is more efficient than adding documents one by one.
+    This endpoint returns immediately with a job_id. Use the job status endpoint
+    to track the progress of document processing.
+    
+    Returns:
+    - job_id: Unique identifier for tracking the processing job
+    - status: Current status (pending, processing, completed, failed)
     """
+    import warnings
+    # Suppress RuntimeWarning about unawaited coroutines from llama_index
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*coroutine.*was never awaited.*")
+    
     try:
         pipeline = get_pipeline()
         
@@ -170,18 +196,59 @@ async def add_documents(request: DocumentsRequest):
             }
             documents.append(doc_dict)
         
-        # Add documents in batch
-        pipeline.add_documents(documents)
+        # Create a job for tracking
+        job_id = str(uuid.uuid4())
+        job_info = {
+            "job_id": job_id,
+            "status": JobStatus.PENDING,
+            "count": len(documents),
+            "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "progress": 0
+        }
+        _jobs[job_id] = job_info
         
+        # Process documents in background
+        async def add_docs_async():
+            """Run add_documents asynchronously."""
+            try:
+                job_info["status"] = JobStatus.PROCESSING
+                job_info["started_at"] = datetime.now().isoformat()
+                job_info["progress"] = 10
+                
+                # Run in executor to avoid blocking
+                import asyncio
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, pipeline.add_documents, documents)
+                
+                job_info["status"] = JobStatus.COMPLETED
+                job_info["completed_at"] = datetime.now().isoformat()
+                job_info["progress"] = 100
+                print(f"add_documents success: {len(documents)} documents processed (job_id: {job_id})")
+            except Exception as e:
+                job_info["status"] = JobStatus.FAILED
+                job_info["completed_at"] = datetime.now().isoformat()
+                job_info["error"] = str(e)
+                print(f"add_documents error in background (job_id: {job_id}): {e}")
+        
+        # Schedule background task without waiting
+        import asyncio
+        asyncio.create_task(add_docs_async())
+        
+        # Return immediately with job ID
         return {
             "success": True,
-            "message": f"Successfully added {len(documents)} documents",
+            "message": f"Accepted {len(documents)} documents for processing",
+            "job_id": job_id,
+            "status": job_info["status"],
             "count": len(documents)
         }
     except Exception as e:
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add documents: {str(e)}"
+            detail=f"Failed to queue documents: {str(e)}"
         ) from e
 
 
@@ -388,6 +455,59 @@ async def clean_neo4j(collection_name: Optional[str] = None):
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clean Neo4j: {str(e)}"
         ) from e
+
+
+@app.get("/api/v1/jobs/{job_id}", tags=["Jobs"])
+async def get_job_status(job_id: str):
+    """
+    Get the status of an async document processing job.
+    
+    Use this endpoint to track the progress of add_documents operations.
+    
+    Returns:
+    - job_id: The job identifier
+    - status: Current status (pending, processing, completed, failed)
+    - count: Number of documents being processed
+    - progress: Progress percentage (0-100)
+    - created_at: When the job was created
+    - started_at: When processing started (if started)
+    - completed_at: When processing completed (if completed)
+    - error: Error message (if failed)
+    """
+    if job_id not in _jobs:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found"
+        )
+    
+    job_info = _jobs[job_id].copy()
+    return job_info
+
+
+@app.get("/api/v1/jobs", tags=["Jobs"])
+async def list_jobs(limit: int = 50, status: Optional[str] = None):
+    """
+    List recent jobs with optional status filter.
+    
+    Parameters:
+    - limit: Maximum number of jobs to return (default: 50)
+    - status: Optional status filter (pending, processing, completed, failed)
+    """
+    jobs_list = list(_jobs.values())
+    
+    # Filter by status if provided
+    if status:
+        jobs_list = [j for j in jobs_list if j.get("status") == status]
+    
+    # Sort by created_at (newest first) and limit
+    jobs_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    jobs_list = jobs_list[:limit]
+    
+    return {
+        "jobs": jobs_list,
+        "count": len(jobs_list),
+        "total": len(_jobs)
+    }
 
 
 @app.get("/api/v1/database/status", tags=["Database"], response_model=StatusResponse)

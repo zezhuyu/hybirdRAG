@@ -1,7 +1,24 @@
 import asyncio
-import nest_asyncio
 
+# Apply nest_asyncio lazily only when needed to avoid breaking uvicorn startup
+# We'll apply it when we detect a running loop, not at module import time
+try:
+import nest_asyncio
+    _nest_asyncio_applied = False
+
+    def _ensure_nest_asyncio():
+        """Apply nest_asyncio if not already applied."""
+        global _nest_asyncio_applied
+        if not _nest_asyncio_applied:
+            try:
 nest_asyncio.apply()
+                _nest_asyncio_applied = True
+            except Exception:
+                pass  # If it fails, continue without it
+except ImportError:
+    # nest_asyncio not available
+    def _ensure_nest_asyncio():
+        pass
 
 from typing import Any, List, Callable, Optional, Union, Dict
 try:
@@ -86,9 +103,39 @@ class GraphRAGExtractor(TransformComponent):
         self, nodes: List[BaseNode], show_progress: bool = False, **kwargs: Any
     ) -> List[BaseNode]:
         """Extract triples from nodes."""
-        return asyncio.run(
+        import concurrent.futures
+        
+        def run_in_thread():
+            """Run async code in a new thread with its own event loop."""
+            # Create a new event loop in this thread
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                return new_loop.run_until_complete(
             self.acall(nodes, show_progress=show_progress, **kwargs)
         )
+            finally:
+                new_loop.close()
+        
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, always use thread pool executor
+                # This is the most reliable approach when called from FastAPI/async contexts
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(run_in_thread)
+                    return future.result()
+            else:
+                # If loop exists but is not running, use it directly
+                return loop.run_until_complete(
+                    self.acall(nodes, show_progress=show_progress, **kwargs)
+                )
+        except (RuntimeError, AttributeError):
+            # If we can't get the event loop or any other error, use thread pool executor
+            # Never use asyncio.run() as it will fail if there's a running loop
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
 
     async def _aextract(self, node: BaseNode) -> BaseNode:
         """Extract triples from a node."""

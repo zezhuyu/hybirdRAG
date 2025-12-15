@@ -63,14 +63,29 @@ class HybridRAGPipeline:
         openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "ollama")
         # Set default Neo4j configuration from environment variables
         if neo4j_config is None:
+            neo4j_host = os.getenv("NEO4J_HOST", "localhost")
+            neo4j_bolt_port = int(os.getenv("NEO4J_BOLT_PORT", "7687"))
+            # Construct URL from host if NEO4J_URL is not explicitly set
+            neo4j_url = os.getenv("NEO4J_URL")
+            if not neo4j_url:
+                neo4j_url = f"bolt://{neo4j_host}:{neo4j_bolt_port}"
+            
             neo4j_config = {
-                "host": os.getenv("NEO4J_HOST", "localhost"),
+                "host": neo4j_host,
                 "username": os.getenv("NEO4J_USERNAME", "neo4j"),
                 "password": os.getenv("NEO4J_PASSWORD", "password"),
                 "database": os.getenv("NEO4J_DATABASE", "neo4j"),
-                "bolt_port": int(os.getenv("NEO4J_BOLT_PORT", "7687")),
-                "url": os.getenv("NEO4J_URL", "bolt://localhost:7687"),
+                "bolt_port": neo4j_bolt_port,
+                "url": neo4j_url,
             }
+            # Debug: Print Neo4j config (show password status)
+            password_value = neo4j_config['password']
+            password_status = "CUSTOM" if password_value != "password" else "DEFAULT"
+            
+            # Verify URL matches host
+            if neo4j_config['url'] != f"bolt://{neo4j_config['host']}:{neo4j_config['bolt_port']}":
+                print(f"⚠️  URL mismatch: url={neo4j_config['url']} but host={neo4j_config['host']}, "
+                      f"expected: bolt://{neo4j_config['host']}:{neo4j_config['bolt_port']}")
         
         # Set default graph vector store configuration from environment variables
         if graph_vector_store_kwargs is None:
@@ -1115,9 +1130,17 @@ Now analyze the question above and respond with JSON only:"""
 
         # Add to GraphRAG only if enabled
         if self.graphrag_enabled and all_nodes:
-            self.graph_rag.build_index(all_nodes)
-            # 🚀 Generate communities immediately during document loading (not query time!)
-            self.graph_rag.build_communities()
+            try:
+                self.graph_rag.build_index(all_nodes)
+                # 🚀 Generate communities immediately during document loading (not query time!)
+                self.graph_rag.build_communities()
+            except RuntimeError as e:
+                # Handle asyncio.run() errors from llama_index
+                if "asyncio.run()" in str(e) or "event loop" in str(e).lower():
+                    print(f"⚠️ GraphRAG processing skipped due to event loop conflict: {e}")
+                    print("📝 Documents added to vector RAG only (GraphRAG disabled for this operation)")
+                else:
+                    raise
 
     def _build_graph_nodes(
         self, text: str, metadata: Dict[str, Any]

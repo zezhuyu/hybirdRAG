@@ -16,7 +16,7 @@ services:
       - GRAPH_CREATE_MODEL=gpt-oss:latest
       - NEO4J_HOST=localhost
       - NEO4J_USERNAME=neo4j
-      - NEO4J_PASSWORD=password
+      - NEO4J_PASSWORD=GraphRAG
       - NEO4J_DATABASE=neo4j  
       - GRAPHRAG_ENABLED=True
     networks:
