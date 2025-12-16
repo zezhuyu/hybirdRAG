@@ -3,7 +3,7 @@ import asyncio
 # Apply nest_asyncio lazily only when needed to avoid breaking uvicorn startup
 # We'll apply it when we detect a running loop, not at module import time
 try:
-import nest_asyncio
+    import nest_asyncio
     _nest_asyncio_applied = False
 
     def _ensure_nest_asyncio():
@@ -11,7 +11,7 @@ import nest_asyncio
         global _nest_asyncio_applied
         if not _nest_asyncio_applied:
             try:
-nest_asyncio.apply()
+                nest_asyncio.apply()
                 _nest_asyncio_applied = True
             except Exception:
                 pass  # If it fails, continue without it
