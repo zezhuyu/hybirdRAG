@@ -1,10 +1,12 @@
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status as http_status
+from fastapi import FastAPI, HTTPException, status as http_status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+import tempfile
+import os
 
 # Load .env file before anything else
 from dotenv import load_dotenv
@@ -14,6 +16,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from HybirdRAG.pipeline import HybridRAGPipeline
+from HybirdRAG.load_pdf import extract_full_text, prepare_single_document
 from clean import (
     clear_all_databases,
     clear_milvus_collection,
@@ -129,6 +132,87 @@ async def health_check():
 
 
 # Document Management Endpoints
+@app.get("/api/v1/documents/status", tags=["Documents"])
+async def document_status(
+    collection_name: Optional[str] = None,
+):
+    """
+    Get document status (count) without retrieving document content.
+    
+    Parameters:
+    - collection_name: Optional collection name (default: pipeline default)
+    
+    Returns:
+    - collection_name: The collection queried
+    - document_count: Number of entities/documents in the collection
+    """
+    try:
+        pipeline = get_pipeline()
+        vr = pipeline.vector_rag
+        coll = collection_name or vr.collection_name
+        if not vr.milvus.has_collection(collection_name=coll):
+            return {"collection_name": coll, "document_count": 0}
+        stats = vr.milvus.get_collection_stats(collection_name=coll)
+        count = int(stats.get("row_count", 0))
+        return {"collection_name": coll, "document_count": count}
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get document status: {str(e)}"
+        ) from e
+
+
+@app.get("/api/v1/documents", tags=["Documents"])
+async def list_documents(
+    collection_name: Optional[str] = None,
+    limit: int = 1000,
+):
+    """
+    List documents from the vector store.
+    
+    Parameters:
+    - collection_name: Optional collection name (default: pipeline default)
+    - limit: Maximum number of documents to return (default: 1000)
+    
+    Returns:
+    - documents: List of document content strings (and optional metadata)
+    """
+    try:
+        pipeline = get_pipeline()
+        vr = pipeline.vector_rag
+        coll = collection_name or vr.collection_name
+        if not vr.milvus.has_collection(collection_name=coll):
+            return {"documents": []}
+        # Query Milvus for documents (empty filter = all entities, limit results)
+        result = vr.milvus.query(
+            collection_name=coll,
+            filter="",
+            output_fields=["id", "content", "title", "page", "source", "source_path", "add_at"],
+            limit=min(limit, 16383),
+        )
+        # Return full document dicts for frontend (document_id, collection_name, layer, timestamp, etc.)
+        documents = []
+        for r in (result or []):
+            if not isinstance(r, dict):
+                continue
+            doc = {
+                "id": r.get("id"),
+                "content": r.get("content", ""),
+                "title": r.get("title", ""),
+                "page": r.get("page", 0),
+                "source": r.get("source", ""),
+                "source_path": r.get("source_path", ""),
+                "add_at": r.get("add_at"),
+            }
+            documents.append(doc)
+        return {"documents": documents}
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list documents: {str(e)}"
+        ) from e
+
+
 @app.post("/api/v1/documents", tags=["Documents"], status_code=http_status.HTTP_201_CREATED)
 async def add_document(document: Document):
     """
@@ -249,6 +333,132 @@ async def add_documents(request: DocumentsRequest):
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to queue documents: {str(e)}"
+        ) from e
+
+
+@app.post("/api/v1/documents/upload", tags=["Documents"])
+async def upload_document(
+    file: UploadFile = File(...),
+    use_ocr: bool = False,
+    collection_name: Optional[str] = None
+):
+    """
+    Upload and process a PDF document.
+    
+    This endpoint accepts a PDF file, extracts text from it,
+    and adds the resulting documents to the RAG system.
+    
+    Parameters:
+    - file: PDF file to upload
+    - use_ocr: Enable OCR for scanned PDFs (default: False, uses PyPDF)
+    - collection_name: Optional collection name for organizing documents
+    
+    Returns:
+    - job_id: ID to track the processing job
+    - status: Current job status
+    - count: Number of documents (1; full text is sent to the chunker for chunking)
+    """
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported"
+            )
+        
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = Path(temp_file.name)
+        
+        try:
+            # Extract all text from PDF as a single string, then prepare one document for the chunker
+            print(f"Extracting text from {file.filename}...")
+            full_text = extract_full_text(temp_file_path, use_ocr=use_ocr)
+            documents = prepare_single_document(full_text, Path(file.filename), collection_name=collection_name)
+            
+            if not documents:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="No text could be extracted from the PDF"
+                )
+            
+            print(f"Prepared 1 document (full text) for chunking")
+            
+            # Get pipeline
+            pipeline = get_pipeline()
+            
+            # Create job for async processing
+            job_id = str(uuid.uuid4())
+            job_info = {
+                "job_id": job_id,
+                "status": JobStatus.PENDING,
+                "count": len(documents),
+                "filename": file.filename,
+                "created_at": datetime.now().isoformat(),
+                "started_at": None,
+                "completed_at": None,
+                "error": None,
+                "progress": 0
+            }
+            _jobs[job_id] = job_info
+            
+            # Process documents in background
+            async def process_upload_async():
+                """Process uploaded document asynchronously."""
+                try:
+                    job_info["status"] = JobStatus.PROCESSING
+                    job_info["started_at"] = datetime.now().isoformat()
+                    job_info["progress"] = 10
+                    
+                    # Run in executor to avoid blocking
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, pipeline.add_documents, documents)
+                    
+                    job_info["progress"] = 80
+                    
+                    # Rebuild communities
+                    print("Rebuilding graph communities...")
+                    await loop.run_in_executor(None, pipeline.graph_rag.build_communities)
+                    
+                    job_info["status"] = JobStatus.COMPLETED
+                    job_info["completed_at"] = datetime.now().isoformat()
+                    job_info["progress"] = 100
+                    print(f"Upload processing complete: {file.filename} (job_id: {job_id})")
+                except Exception as e:
+                    job_info["status"] = JobStatus.FAILED
+                    job_info["completed_at"] = datetime.now().isoformat()
+                    job_info["error"] = str(e)
+                    print(f"Upload processing error (job_id: {job_id}): {e}")
+            
+            # Schedule background task
+            import asyncio
+            asyncio.create_task(process_upload_async())
+            
+            return {
+                "success": True,
+                "message": f"Accepted file {file.filename} for processing",
+                "job_id": job_id,
+                "status": job_info["status"],
+                "count": len(documents),
+                "filename": file.filename
+            }
+            
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temporary file: {e}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process upload: {str(e)}"
         ) from e
 
 
@@ -544,9 +754,12 @@ async def root():
             "docs": "/docs",
             "add_document": "/api/v1/documents",
             "add_documents_batch": "/api/v1/documents/batch",
+            "upload_document": "/api/v1/documents/upload",
+            "document_status": "/api/v1/documents/status",
             "query": "/api/v1/query",
             "clean_database": "/api/v1/database/clean",
-            "database_status": "/api/v1/database/status"
+            "database_status": "/api/v1/database/status",
+            "job_status": "/api/v1/jobs/{job_id}"
         }
     }
 

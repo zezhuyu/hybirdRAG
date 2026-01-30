@@ -67,7 +67,7 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
             result = self._session.run(query)
             entities = []
             for record in result:
-                name = record["name"]
+                name = record["name"] if record["name"] is not None else "(unnamed)"
                 labels = record["labels"] if record["labels"] else []
                 description = record["description"] or ""
                 properties_str = record["properties"] or "{}"
@@ -374,13 +374,16 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
             for record in records:
                 record_count += 1
                 try:
+                    # EntityNode requires name to be a non-null string; Neo4j can return null
+                    source_name = record["source_name"] if record["source_name"] is not None else "(unnamed)"
+                    target_name = record["target_name"] if record["target_name"] is not None else "(unnamed)"
                     source_node = EntityNode(
-                        name=record["source_name"],
+                        name=source_name,
                         label=record["source_labels"][0] if record["source_labels"] else "Node",
                         properties=record["source_properties"]
                     )
                     target_node = EntityNode(
-                        name=record["target_name"],
+                        name=target_name,
                         label=record["target_labels"][0] if record["target_labels"] else "Node",
                         properties=record["target_properties"]
                     )
@@ -395,8 +398,8 @@ class CustomNeo4jPropertyGraphStore(PropertyGraphStore):
                     
                     relation = Relation(
                         label=relation_label,
-                        source_id=record["source_name"],
-                        target_id=record["target_name"],
+                        source_id=source_name,
+                        target_id=target_name,
                         properties=relation_properties
                     )
                     triplets.append((source_node, relation, target_node))

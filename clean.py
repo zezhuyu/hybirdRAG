@@ -325,6 +325,9 @@ def get_database_status() -> Dict[str, Any]:
 def example_usage():
     """Example of how to use the database utility functions."""
     
+
+
+    collection_name = "quickta"
     # Load environment first
     env_path = Path("HybirdRAG/.env")
     if env_path.exists():
@@ -344,7 +347,7 @@ def example_usage():
     
     # Example: Clear only Milvus
     print("\n🗑️  Clearing Milvus collection...")
-    milvus_result = clear_milvus_collection("musique_rag")
+    milvus_result = clear_milvus_collection(collection_name)
     if milvus_result["success"]:
         print(f"✅ Cleared {milvus_result['deleted_count']} entities from Milvus")
     else:
@@ -352,7 +355,7 @@ def example_usage():
     
     # Example: Clear all databases
     print("\n🗑️  Clearing all databases...")
-    all_result = clear_all_databases("musique_rag")
+    all_result = clear_all_databases(collection_name)
     if all_result["success"]:
         print("✅ All databases cleared successfully!")
     else:

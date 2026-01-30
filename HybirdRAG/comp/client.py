@@ -136,15 +136,19 @@ class MLModelClient:
                     self._rerank_warning_shown = True
                 return documents  # Return original documents if no scores
             
-            # Check if we have valid scores
-            if len(response.scores) != len(documents):
+            # Align scores with documents: reranker may return fewer scores (e.g. top-k limit)
+            scores = list(response.scores)
+            if len(scores) < len(documents):
                 if not hasattr(self, '_rerank_mismatch_warning_shown'):
-                    print(f"⚠️  Warning: Rerank scores count mismatch (got {len(response.scores)}, expected {len(documents)})")
+                    print(f"⚠️  Warning: Rerank scores count mismatch (got {len(scores)}, expected {len(documents)}); using scores for first N, rest ranked last")
                     self._rerank_mismatch_warning_shown = True
-                return documents
+                # Pad with low score so unscored docs sort to the end
+                scores = scores + [-1.0] * (len(documents) - len(scores))
+            elif len(scores) > len(documents):
+                scores = scores[:len(documents)]
             
             # Sort documents by scores (higher scores first)
-            sorted_docs = sorted([{'doc': doc, 'score': score} for doc, score in zip(documents, response.scores)], 
+            sorted_docs = sorted([{'doc': doc, 'score': score} for doc, score in zip(documents, scores)], 
                                key=lambda x: x['score'], reverse=True)
             return [item['doc'] for item in sorted_docs]
         

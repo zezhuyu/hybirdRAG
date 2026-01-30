@@ -52,15 +52,16 @@ class HybridRAGPipeline:
         neo4j_config: Optional[Dict[str, Any]] = None,
         graph_vector_store_kwargs: Optional[Dict[str, Any]] = None,
         milvus_client_kwargs: Optional[Dict[str, Any]] = None,
-        collection_name: str = "vector_rag",
-        splitter_chunk_size: int = 512,  # Smaller chunks for better retrieval
-        splitter_overlap: int = 100,     # More overlap for better context
+        collection_name: str = None,
+        splitter_chunk_size: int = 128,  # Smaller chunks for better retrieval
+        splitter_overlap: int = 32,     # More overlap for better context
     ) -> None:
         # Set default values from environment variables
         service_host = service_host or os.getenv("SERVICE_HOST", "localhost:50051")
         milvus_host = milvus_host or os.getenv("MILVUS_HOST", "localhost:19530")
         openai_host = openai_host or os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
         openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "ollama")
+        collection_name = collection_name or os.getenv("COLLECTION_NAME", "vector_rag")
         # Set default Neo4j configuration from environment variables
         if neo4j_config is None:
             neo4j_host = os.getenv("NEO4J_HOST", "localhost")
@@ -207,7 +208,16 @@ class HybridRAGPipeline:
             chunk_size=splitter_chunk_size,
             chunk_overlap=splitter_overlap,
         )
-        self.chunker = HybridChunker(embedding_client=OpenAIEmbeddingClient(self.openai))  # Default chunker, can be overridden
+        self.chunker = HybridChunker(
+            embedding_client=OpenAIEmbeddingClient(self.openai),
+            max_tokens_per_chunk=splitter_chunk_size,
+            min_tokens_per_chunk=50,
+            sim_drop=0.40,
+            fixed_threshold=0.45,
+            c=0.9, 
+            init_constant=1.5,
+            overlap_tokens=splitter_overlap,
+        )  # Default chunker, can be overridden
         self.context_chunker = ContextualChunker()
 
     def _broaden_query_with_retry(self, query_text: str, retry_limit: int = 3) -> Optional[List[str]]:
@@ -1050,13 +1060,7 @@ Now analyze the question above and respond with JSON only:"""
                 else str(query_text)
             )
             try:
-                # Check if RERANKER_MODEL_NAME is set and not empty
-                reranker_model_name = os.getenv("RERANKER_MODEL_NAME", "").strip()
-                if reranker_model_name:
-                    reranker = OpenAIRerankerClient()
-                    reranked_texts = reranker.rerank_documents(vector_texts, rerank_query)
-                else:
-                    reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
+                reranked_texts = self.service.rerank_documents(vector_texts, rerank_query)
                 if reranked_texts and len(reranked_texts) > 0:
                     if not (
                         graph_answer is not None
@@ -1086,16 +1090,32 @@ Now analyze the question above and respond with JSON only:"""
 
         return results
         
+    def _prior_knowledge_from_metadata(self, metadata: Dict[str, Any]) -> Optional[str]:
+        """Extract prior_knowledge or summary from document metadata (top-level or nested)."""
+        pk = metadata.get("prior_knowledge") or metadata.get("summary")
+        if pk is not None and isinstance(pk, str) and pk.strip():
+            return pk.strip()
+        nested = metadata.get("metadata")
+        if isinstance(nested, dict):
+            pk = nested.get("prior_knowledge") or nested.get("summary")
+            if pk is not None and isinstance(pk, str) and pk.strip():
+                return pk.strip()
+        return None
+
     def add_document(self, document: Dict[str, Any]) -> None:
         metadata = {k: v for k, v in document.items() if k != "content"}
         text = document.get("content", "")
         if not text:
             return
 
-        vector_docs = [
-            {**metadata, "content": chunk}
-            for chunk in self.chunker.chunk_document(text)
-        ]
+        prior_knowledge = self._prior_knowledge_from_metadata(metadata)
+        chunks = self.chunker.chunk_document(
+            text,
+            doc_context=metadata,
+            prior_knowledge=prior_knowledge,
+            inject_context=True,
+        )
+        vector_docs = [{**metadata, "content": chunk} for chunk in chunks]
         if vector_docs:
             self.vector_rag.add_document(vector_docs)
 
@@ -1117,10 +1137,14 @@ Now analyze the question above and respond with JSON only:"""
             if not text:
                 continue
 
-            all_vector_docs.extend(
-                {**metadata, "content": chunk}
-                for chunk in self.chunker.chunk_document(text)
+            prior_knowledge = self._prior_knowledge_from_metadata(metadata)
+            chunks = self.chunker.chunk_document(
+                text,
+                doc_context=metadata,
+                prior_knowledge=prior_knowledge,
+                inject_context=True,
             )
+            all_vector_docs.extend({**metadata, "content": chunk} for chunk in chunks)
             # Build graph nodes only if GraphRAG is enabled
             if self.graphrag_enabled:
                 all_nodes.extend(self._build_graph_nodes(text, metadata))

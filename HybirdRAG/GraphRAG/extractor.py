@@ -160,9 +160,13 @@ class GraphRAGExtractor(TransformComponent):
         existing_relations = node.metadata.pop(KG_RELATIONS_KEY, [])
         entity_metadata = node.metadata.copy()
         for entity, entity_type, description in entities:
+            if entity is None or (isinstance(entity, str) and not entity.strip()):
+                continue
             entity_metadata["entity_description"] = description
             entity_node = EntityNode(
-                name=entity, label=entity_type, properties=entity_metadata
+                name=entity if isinstance(entity, str) else str(entity),
+                label=entity_type or "Node",
+                properties=entity_metadata
             )
             existing_nodes.append(entity_node)
 

@@ -18,7 +18,8 @@ services:
       - NEO4J_USERNAME=neo4j
       - NEO4J_PASSWORD=GraphRAG
       - NEO4J_DATABASE=neo4j  
-      - GRAPHRAG_ENABLED=True
+      - COLLECTION_NAME=quickta
+      - GRAPHRAG_ENABLED=False
     networks:
       - db-network
 

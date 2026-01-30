@@ -133,12 +133,15 @@ class OpenAIRerankerClient:
                     self._rerank_warning_shown = True
                 return documents  # Return original documents if no scores
             
-            # Check if we have valid scores
-            if len(scores) != len(documents):
+            # Align scores with documents: reranker may return fewer scores (e.g. top-k limit)
+            if len(scores) < len(documents):
                 if not hasattr(self, '_rerank_mismatch_warning_shown'):
-                    print(f"⚠️  Warning: Rerank scores count mismatch (got {len(scores)}, expected {len(documents)})")
+                    print(f"⚠️  Warning: Rerank scores count mismatch (got {len(scores)}, expected {len(documents)}); using scores for first N, rest ranked last")
                     self._rerank_mismatch_warning_shown = True
-                return documents
+                # Pad with low score so unscored docs sort to the end
+                scores = list(scores) + [-1.0] * (len(documents) - len(scores))
+            elif len(scores) > len(documents):
+                scores = scores[:len(documents)]
             
             # Sort documents by scores (higher scores first)
             sorted_docs = sorted([{'doc': doc, 'score': float(score)} for doc, score in zip(documents, scores)], 

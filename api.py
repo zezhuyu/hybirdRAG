@@ -167,9 +167,12 @@ async def root():
             "rest_api": {
                 "add_document": "/api/v1/documents",
                 "add_documents_batch": "/api/v1/documents/batch",
+                "upload_document": "/api/v1/documents/upload",
                 "query": "/api/v1/query",
                 "clean_database": "/api/v1/database/clean",
-                "database_status": "/api/v1/database/status"
+                "database_status": "/api/v1/database/status",
+                "job_status": "/api/v1/jobs/{job_id}",
+                "list_jobs": "/api/v1/jobs"
             },
             "mcp": {
                 "list_tools": "/mcp/tools",

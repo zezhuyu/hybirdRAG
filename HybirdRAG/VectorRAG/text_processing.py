@@ -1,6 +1,6 @@
 import spacy
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
@@ -526,15 +526,75 @@ class HybridChunker:
         
         return filtered_paragraphs
 
+    # ---------- Context injection (preserve semantic meaning) ----------
+    def _build_context_prefix(
+        self,
+        doc_context: Optional[Dict[str, Any]] = None,
+        prior_knowledge: Optional[str] = None,
+        max_prefix_tokens: int = 60,
+    ) -> str:
+        """
+        Build a short prefix to inject into each chunk so it preserves document-level
+        meaning and optional prior knowledge. Keeps prefix under max_prefix_tokens.
+        """
+        if not doc_context and not (prior_knowledge and prior_knowledge.strip()):
+            return ""
+        parts = []
+        if doc_context:
+            title = doc_context.get("title") or doc_context.get("source") or "Document"
+            if isinstance(title, str) and title.strip():
+                parts.append(f"Document: {title.strip()}")
+            source = doc_context.get("source")
+            if isinstance(source, str) and source.strip() and source != title:
+                parts.append(f"Source: {source.strip()}")
+        if prior_knowledge and isinstance(prior_knowledge, str) and prior_knowledge.strip():
+            parts.append(f"Relevant context: {prior_knowledge.strip()}")
+        if not parts:
+            return ""
+        prefix = " ".join(parts)
+        # Cap by token count (approx by words)
+        words = prefix.split()
+        if len(words) > max_prefix_tokens:
+            prefix = " ".join(words[:max_prefix_tokens])
+        return prefix + "\n\n"
+
+    def _inject_context_into_chunks(
+        self,
+        chunks: List[str],
+        doc_context: Optional[Dict[str, Any]] = None,
+        prior_knowledge: Optional[str] = None,
+        max_prefix_tokens: int = 60,
+    ) -> List[str]:
+        """Prepend document context and optional prior knowledge to each chunk."""
+        prefix = self._build_context_prefix(doc_context, prior_knowledge, max_prefix_tokens)
+        if not prefix:
+            return chunks
+        return [prefix + chunk for chunk in chunks]
+
     # ---------- Full Pipeline ----------
-    def chunk_document(self, text: str):
+    def chunk_document(
+        self,
+        text: str,
+        doc_context: Optional[Dict[str, Any]] = None,
+        prior_knowledge: Optional[str] = None,
+        inject_context: bool = True,
+        max_context_tokens: int = 60,
+    ) -> List[str]:
         """
         Perform chunking using configurable stages:
         - Stage 1 (optional): Contextual segmentation
         - Stage 2 (always): Late chunking (token-based)
         - Stage 3 (optional): Max–Min semantic chunking
-        
-        Returns a list of final coherent chunks ready for DB storage.
+        - Stage 4 (optional): Inject document context and prior knowledge into each chunk
+
+        Args:
+            text: Raw document text to chunk.
+            doc_context: Optional dict with title, source, etc. Injected into each chunk.
+            prior_knowledge: Optional string (definitions, key concepts). Injected into each chunk.
+            inject_context: If True, prepend context/prior_knowledge to each chunk.
+            max_context_tokens: Max tokens for the injected prefix (default 60).
+
+        Returns a list of final coherent chunks ready for DB storage (each self-contained).
         """
         if not text or not text.strip():
             return []
@@ -590,6 +650,15 @@ class HybridChunker:
             else:
                 # Skip semantic chunking, use late chunks directly
                 all_chunks.extend(late_chunks)
+
+        # Stage 4: Inject document context and prior knowledge into each chunk
+        if inject_context and (doc_context or (prior_knowledge and str(prior_knowledge).strip())):
+            all_chunks = self._inject_context_into_chunks(
+                all_chunks,
+                doc_context=doc_context,
+                prior_knowledge=prior_knowledge,
+                max_prefix_tokens=max_context_tokens,
+            )
 
         return all_chunks
 

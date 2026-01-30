@@ -84,6 +84,7 @@ def _extract_text_with_pypdf(pdf_path: Path) -> List[str]:
 
 
 def _prepare_documents(pages: Iterable[str], source_path: Path) -> List[Dict[str, Any]]:
+    """Prepare one document per page (legacy)."""
     documents: List[Dict[str, Any]] = []
     title = source_path.stem.replace("_", " ")
     for idx, page_text in enumerate(pages, start=1):
@@ -100,6 +101,37 @@ def _prepare_documents(pages: Iterable[str], source_path: Path) -> List[Dict[str
             }
         )
     return documents
+
+
+def extract_full_text(pdf_path: Path, language: str = "en", use_ocr: bool = False) -> str:
+    """
+    Extract all text from a PDF as a single string.
+    Uses PyPDF (default) or OCR. Pages are joined with double newlines.
+    """
+    pages = _ocr_pdf(pdf_path, language=language, use_ocr=use_ocr)
+    return "\n\n".join(p.strip() for p in pages if p and p.strip())
+
+
+def prepare_single_document(
+    full_text: str, source_path: Path, collection_name: str | None = None
+) -> List[Dict[str, Any]]:
+    """
+    Build a single document dict with all extracted text for the chunker.
+    The pipeline will chunk this full text via HybridChunker instead of per-page.
+    """
+    if not full_text.strip():
+        return []
+    title = source_path.stem.replace("_", " ")
+    doc: Dict[str, Any] = {
+        "content": full_text.strip(),
+        "title": title,
+        "page": 0,  # single full-doc; Milvus requires INT64, use 0 for "no page"
+        "source": source_path.name,
+        "source_path": str(source_path.resolve()),
+    }
+    if collection_name:
+        doc["metadata"] = {"collection": collection_name}
+    return [doc]
 
 
 def main() -> None:
