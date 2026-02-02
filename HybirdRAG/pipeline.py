@@ -930,6 +930,7 @@ Now analyze the question above and respond with JSON only:"""
         rerank: bool = True,
         compress: bool = False,
         limit: int = 30,  # Increased from 20 to get more context for multi-hop questions
+        collection_name: Optional[str] = None,
     ):
         query_text = query
         if rewrite:
@@ -993,7 +994,7 @@ Now analyze the question above and respond with JSON only:"""
             query_text = [self._clean_query_text(str(query_text))]
 
         
-        vector_results = self.vector_rag.query(query_text, limit=limit)
+        vector_results = self.vector_rag.query(query_text, limit=limit, collection_name=collection_name)
         
         # Try to get graph answer, but handle gracefully if it fails
         graph_answer = None

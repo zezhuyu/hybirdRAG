@@ -177,6 +177,10 @@ def get_mcp_tools_dict() -> List[Dict[str, Any]]:
                         "type": "integer",
                         "description": "Maximum number of results to return (default: 30)",
                         "default": 30
+                    },
+                    "collection_name": {
+                        "type": "string",
+                        "description": "Optional Milvus collection name to query (default: pipeline COLLECTION_NAME or 'vector_rag')"
                     }
                 },
                 "required": ["query"]
@@ -396,6 +400,7 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
                 }
             
             pipeline = get_pipeline()
+            collection_name = arguments.get("collection_name")
             results = pipeline.query(
                 query=query_text,
                 rewrite=arguments.get("rewrite", True),
@@ -405,7 +410,8 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
                 context_chunk_size=arguments.get("context_chunk_size", 256),
                 rerank=arguments.get("rerank", True),
                 compress=arguments.get("compress", False),
-                limit=arguments.get("limit", 30)
+                limit=arguments.get("limit", 30),
+                collection_name=collection_name
             )
             
             if not isinstance(results, list):

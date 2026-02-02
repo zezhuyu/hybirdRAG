@@ -154,7 +154,7 @@ class VectorRAGPipeline:
         except Exception:
             return None
 
-    def query(self, query: List[str], limit: int = 20, filters: List[str] = None):  # Increased default limit
+    def query(self, query: List[str], limit: int = 20, filters: List[str] = None, collection_name: str = None):  # Increased default limit
         # Handle both single query and list of queries
         if isinstance(query, str):
             query_list = [query]
@@ -204,10 +204,11 @@ class VectorRAGPipeline:
         )
 
             
+        coll = (collection_name or self.collection_name)
         # Use simple vector search instead of hybrid search to avoid the error
         try:
             results = self.milvus.hybrid_search(
-                    self.collection_name,
+                    coll,
                     [full_text_search_req, dense_req],
                     ranker=RRFRanker(),
                     limit=limit,
@@ -222,7 +223,7 @@ class VectorRAGPipeline:
             try:
                 if query_embedding is not None:
                     results = self.milvus.search(
-                        collection_name=self.collection_name,
+                        collection_name=coll,
                         data=query_embedding,
                         anns_field="vector",
                         param={"metric_type": "COSINE"},
