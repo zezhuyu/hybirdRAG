@@ -53,9 +53,14 @@ class HybridRAGPipeline:
         graph_vector_store_kwargs: Optional[Dict[str, Any]] = None,
         milvus_client_kwargs: Optional[Dict[str, Any]] = None,
         collection_name: str = None,
-        splitter_chunk_size: int = 128,  # Smaller chunks for better retrieval
-        splitter_overlap: int = 32,     # More overlap for better context
+        splitter_chunk_size: int = None,  # From env CHUNK_SIZE, default 256 for better prepared-Q retrieval
+        splitter_overlap: int = None,     # From env CHUNK_OVERLAP, default 64
     ) -> None:
+        # Chunk size: larger (256) helps prepared questions / Q&A stay together
+        if splitter_chunk_size is None:
+            splitter_chunk_size = int(os.getenv("CHUNK_SIZE", "256"))
+        if splitter_overlap is None:
+            splitter_overlap = int(os.getenv("CHUNK_OVERLAP", "64"))
         # Set default values from environment variables
         service_host = service_host or os.getenv("SERVICE_HOST", "localhost:50051")
         milvus_host = milvus_host or os.getenv("MILVUS_HOST", "localhost:19530")
@@ -1135,14 +1140,41 @@ Now analyze the question above and respond with JSON only:"""
                 # 🚀 For single documents, use smart rebuilding to avoid unnecessary work
                 self._rebuild_communities_if_needed()
 
+    @staticmethod
+    def _clean_text_for_chunking(text: str) -> str:
+        """Remove PDF noise (page numbers, citation keys, TOC dots, stray URLs) before chunking."""
+        lines = text.split("\n")
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip lines that are just a number (page numbers)
+            if stripped.isdigit():
+                continue
+            # Skip lines that are only dots / punctuation / whitespace
+            if all(c in ".·… \t-_|" for c in stripped):
+                continue
+            # Skip very short lines (<15 chars) that are likely noise
+            if len(stripped) < 15 and not any(c.isalpha() for c in stripped):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         all_vector_docs: List[Dict[str, Any]] = []
         all_nodes: List[TextNode] = []
+
+        min_chunk_tokens = int(os.getenv("MIN_CHUNK_TOKENS", "30"))
 
         for document in documents:
             metadata = {k: v for k, v in document.items() if k != "content"}
             text = document.get("content", "")
             if not text:
+                continue
+
+            text = self._clean_text_for_chunking(text)
+            if not text.strip():
                 continue
 
             prior_knowledge = self._prior_knowledge_from_metadata(metadata)
@@ -1152,6 +1184,8 @@ Now analyze the question above and respond with JSON only:"""
                 prior_knowledge=prior_knowledge,
                 inject_context=True,
             )
+            # Filter out chunks that are too short to be useful
+            chunks = [c for c in chunks if len(c.split()) >= min_chunk_tokens]
             all_vector_docs.extend({**metadata, "content": chunk} for chunk in chunks)
             # Build graph nodes only if GraphRAG is enabled
             if self.graphrag_enabled:

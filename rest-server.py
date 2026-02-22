@@ -419,9 +419,10 @@ async def upload_document(
                     
                     job_info["progress"] = 80
                     
-                    # Rebuild communities
-                    print("Rebuilding graph communities...")
-                    await loop.run_in_executor(None, pipeline.graph_rag.build_communities)
+                    # Rebuild GraphRAG communities only if enabled
+                    if getattr(pipeline, "graphrag_enabled", False):
+                        print("Rebuilding graph communities...")
+                        await loop.run_in_executor(None, pipeline.graph_rag.build_communities)
                     
                     job_info["status"] = JobStatus.COMPLETED
                     job_info["completed_at"] = datetime.now().isoformat()

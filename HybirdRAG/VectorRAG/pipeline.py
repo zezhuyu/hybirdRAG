@@ -207,35 +207,46 @@ class VectorRAGPipeline:
 
             
         coll = (collection_name or self.collection_name)
-        # Use simple vector search instead of hybrid search to avoid the error
-        try:
-            results = self.milvus.hybrid_search(
-                    coll,
-                    [full_text_search_req, dense_req],
-                    ranker=RRFRanker(),
-                    limit=limit,
-                    **sparse_search_params
-                )
-            # Deduplicate results before returning
-            deduplicated_results = self._deduplicate_results(results)
-            return deduplicated_results
-        except Exception as e:
-            print(f"Vector search failed: {e}")
-            # Fallback to simple vector search
+        default_coll = os.getenv("COLLECTION_NAME", self.collection_name)
+
+        def _do_search(c):
+            """Run hybrid_search or fallback vector search on collection c."""
             try:
-                if query_embedding is not None:
-                    results = self.milvus.search(
-                        collection_name=coll,
+                return self.milvus.hybrid_search(
+                    c, [full_text_search_req, dense_req],
+                    ranker=RRFRanker(), limit=limit, **sparse_search_params
+                )
+            except Exception as e:
+                print(f"Vector search failed: {e}")
+                if query_embedding is None:
+                    return None
+                try:
+                    return self.milvus.search(
+                        collection_name=c,
                         data=query_embedding,
                         anns_field="vector",
-                        param={"metric_type": "COSINE"},
                         limit=limit,
-                        **search_params
+                        output_fields=search_params.get("output_fields"),
+                        filter=search_params.get("filter", ""),
+                        search_params={"metric_type": "COSINE", "params": {}},
                     )
-                    return self._deduplicate_results(results)
-                else:
-                    print("⚠️  Query embedding is None, returning empty results")
+                except Exception as fallback_e:
+                    print(f"⚠️  Fallback vector search also failed: {fallback_e}")
+                    raise
+
+        try:
+            results = _do_search(coll)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "collection not found" in err_str and coll != default_coll:
+                print(f"⚠️  Collection '{coll}' not found, retrying with '{default_coll}'")
+                try:
+                    results = _do_search(default_coll)
+                except Exception:
                     return []
-            except Exception as fallback_e:
-                print(f"⚠️  Fallback vector search also failed: {fallback_e}")
+            else:
                 return []
+
+        if results is None:
+            return []
+        return self._deduplicate_results(results)
