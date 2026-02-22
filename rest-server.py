@@ -477,7 +477,11 @@ async def query(request: QueryRequest):
     """
     try:
         pipeline = get_pipeline()
-        
+        # Respect RERANK_ENABLED and COMPRESS_ENABLED from environment
+        rerank_enabled = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+        compress_enabled = os.getenv("COMPRESS_ENABLED", "false").lower() == "true"
+        rerank = request.rerank if rerank_enabled else False
+        compress = request.compress if compress_enabled else False
         # Execute query
         results = pipeline.query(
             query=request.query,
@@ -486,8 +490,8 @@ async def query(request: QueryRequest):
             broaden_query=request.broaden_query,
             broaden_retry_limit=request.broaden_retry_limit,
             context_chunk_size=request.context_chunk_size,
-            rerank=request.rerank,
-            compress=request.compress,
+            rerank=rerank,
+            compress=compress,
             limit=request.limit
         )
         
@@ -528,13 +532,17 @@ async def query_get(
     """
     try:
         pipeline = get_pipeline()
-        
+        # Respect RERANK_ENABLED and COMPRESS_ENABLED from environment
+        rerank_enabled = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+        compress_enabled = os.getenv("COMPRESS_ENABLED", "false").lower() == "true"
+        rerank_val = rerank if rerank_enabled else False
+        compress_val = compress if compress_enabled else False
         results = pipeline.query(
             query=q,
             rewrite=rewrite,
             broaden_query=broaden_query,
-            rerank=rerank,
-            compress=compress,
+            rerank=rerank_val,
+            compress=compress_val,
             limit=limit
         )
         

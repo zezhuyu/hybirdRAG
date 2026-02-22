@@ -196,6 +196,7 @@ class HybridRAGPipeline:
             milvus_kwargs=graph_milvus_kwargs,
             embedding_model=embedding_wrapper,
             milvus_client=self.milvus,  # Pass the Milvus client for syncing
+            collection_name=collection_name,  # Use same collection as VectorRAG
         )
 
         # Check if GraphRAG is enabled via environment variable
@@ -932,6 +933,11 @@ Now analyze the question above and respond with JSON only:"""
         limit: int = 30,  # Increased from 20 to get more context for multi-hop questions
         collection_name: Optional[str] = None,
     ):
+        # Honor RERANK_ENABLED and COMPRESS_ENABLED env vars
+        if os.getenv("RERANK_ENABLED", "false").lower() != "true":
+            rerank = False
+        if os.getenv("COMPRESS_ENABLED", "false").lower() != "true":
+            compress = False
         query_text = query
         if rewrite:
             chat_history = chat_history or []

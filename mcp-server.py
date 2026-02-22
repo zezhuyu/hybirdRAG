@@ -1,3 +1,4 @@
+import os
 import sys
 import asyncio
 from pathlib import Path
@@ -401,6 +402,11 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
             
             pipeline = get_pipeline()
             collection_name = arguments.get("collection_name")
+            # Respect RERANK_ENABLED and COMPRESS_ENABLED from environment
+            rerank_enabled = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+            compress_enabled = os.getenv("COMPRESS_ENABLED", "false").lower() == "true"
+            rerank = arguments.get("rerank", True) if rerank_enabled else False
+            compress = arguments.get("compress", False) if compress_enabled else False\
             results = pipeline.query(
                 query=query_text,
                 rewrite=arguments.get("rewrite", True),

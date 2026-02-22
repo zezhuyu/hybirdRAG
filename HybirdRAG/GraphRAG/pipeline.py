@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from typing import Any, Dict, List, Optional
@@ -217,6 +218,7 @@ class GraphRAGPipeline:
         milvus_kwargs: Optional[Dict[str, Any]] = None,
         embedding_model: Optional[Any] = None,
         milvus_client: Optional[Any] = None,
+        collection_name: Optional[str] = None,
     ) -> None:
         self.llm = llm
         self.embedding_model = embedding_model
@@ -226,6 +228,13 @@ class GraphRAGPipeline:
         
         # Store the Milvus client for syncing data
         self.milvus_client = milvus_client
+        # Collection name for Milvus queries (raw MilvusClient doesn't have it)
+        self.collection_name = (
+            collection_name
+            or (milvus_kwargs or {}).get("collection_name")
+            or (getattr(milvus_client, "collection_name", None) if milvus_client else None)
+            or os.getenv("COLLECTION_NAME", "vector_rag")
+        )
         
         if vector_store is not None:
             self.vector_store = vector_store
@@ -290,8 +299,8 @@ class GraphRAGPipeline:
             
             start_time = time.time()
             
-            # Get collection info
-            collection_name = self.milvus_client.collection_name if hasattr(self.milvus_client, 'collection_name') else 'vector_rag'
+            # Get collection name (use instance attr - raw MilvusClient has no collection_name)
+            collection_name = self.collection_name
             
             # 🚀 Optimized query with progress indicator
             results = self.milvus_client.query(
@@ -391,8 +400,8 @@ class GraphRAGPipeline:
             
             from llama_index.core.schema import TextNode
             
-            # Get collection info
-            collection_name = self.milvus_client.collection_name if hasattr(self.milvus_client, 'collection_name') else 'vector_rag'
+            # Get collection name (use instance attr)
+            collection_name = self.collection_name
             
             # Query documents from Milvus
             results = self.milvus_client.query(
