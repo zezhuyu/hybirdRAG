@@ -509,7 +509,7 @@ class HybridRAGPipeline:
         # Perform additional retrievals with LLM-generated queries
         for expanded_query in expanded_queries[:8]:  # Limit to 8 queries for efficiency
             try:
-                additional_results = self.vector_rag.query([expanded_query], limit=5)
+                additional_results = self.vector_rag.query([expanded_query], limit=16)
                 additional_contexts = []
                 for hit in additional_results:
                     for hit_item in hit:
@@ -938,6 +938,7 @@ Now analyze the question above and respond with JSON only:"""
             rerank = False
         if os.getenv("COMPRESS_ENABLED", "false").lower() != "true":
             compress = False
+        limit = int(limit) if limit is not None else 30
         query_text = query
         if rewrite:
             chat_history = chat_history or []

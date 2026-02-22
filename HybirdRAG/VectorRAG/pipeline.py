@@ -155,6 +155,8 @@ class VectorRAGPipeline:
             return None
 
     def query(self, query: List[str], limit: int = 20, filters: List[str] = None, collection_name: str = None):  # Increased default limit
+        # Milvus hybrid_search rejects small limits (e.g. 5); enforce minimum
+        limit = max(int(limit), 16) if limit is not None else 20
         # Handle both single query and list of queries
         if isinstance(query, str):
             query_list = [query]

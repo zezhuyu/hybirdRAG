@@ -406,7 +406,9 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
             rerank_enabled = os.getenv("RERANK_ENABLED", "false").lower() == "true"
             compress_enabled = os.getenv("COMPRESS_ENABLED", "false").lower() == "true"
             rerank = arguments.get("rerank", True) if rerank_enabled else False
-            compress = arguments.get("compress", False) if compress_enabled else False\
+            compress = arguments.get("compress", False) if compress_enabled else False
+            limit_raw = arguments.get("limit", 30)
+            limit_val = int(limit_raw) if limit_raw is not None else 30
             results = pipeline.query(
                 query=query_text,
                 rewrite=arguments.get("rewrite", True),
@@ -414,9 +416,9 @@ async def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str
                 broaden_query=arguments.get("broaden_query", True),
                 broaden_retry_limit=arguments.get("broaden_retry_limit", 3),
                 context_chunk_size=arguments.get("context_chunk_size", 256),
-                rerank=arguments.get("rerank", True),
-                compress=arguments.get("compress", False),
-                limit=arguments.get("limit", 30),
+                rerank=rerank,
+                compress=compress,
+                limit=limit_val,
                 collection_name=collection_name
             )
             
