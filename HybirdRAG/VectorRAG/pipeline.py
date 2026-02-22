@@ -23,7 +23,7 @@ bm25_function = Function(
     function_type=FunctionType.BM25, # Set to `BM25`
 )
 
-DIMENSION = 1024
+DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 
 schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True, auto_id=True)
 schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=10000, enable_analyzer=True)
