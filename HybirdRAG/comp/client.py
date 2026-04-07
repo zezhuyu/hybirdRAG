@@ -127,7 +127,13 @@ class MLModelClient:
 
     def rerank_documents(self, documents: List[str], query: str) -> List[str]:
         def _call():
-            response = self.stub.RerankDocuments(pb2.RerankDocumentsRequest(documents=documents, query=query))
+            response = self.stub.RerankDocuments(
+                pb2.RerankDocumentsRequest(
+                    documents=documents,
+                    query=query,
+                    max_batch_size=len(documents),
+                )
+            )
             if not response.scores or len(response.scores) == 0:
                 # Silently return original documents if reranking isn't working
                 # Only print warning once per client instance
