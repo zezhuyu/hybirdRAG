@@ -1162,7 +1162,7 @@ Now analyze the question above and respond with JSON only:"""
         return "\n".join(cleaned)
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
-        all_vector_docs: List[Dict[str, Any]] = []
+        vector_docs_by_collection: Dict[str, List[Dict[str, Any]]] = {}
         all_nodes: List[TextNode] = []
 
         min_chunk_tokens = int(os.getenv("MIN_CHUNK_TOKENS", "30"))
@@ -1186,13 +1186,29 @@ Now analyze the question above and respond with JSON only:"""
             )
             # Filter out chunks that are too short to be useful
             chunks = [c for c in chunks if len(c.split()) >= min_chunk_tokens]
-            all_vector_docs.extend({**metadata, "content": chunk} for chunk in chunks)
+            nested_metadata = metadata.get("metadata")
+            if not isinstance(nested_metadata, dict):
+                nested_metadata = {}
+            collection_name = (
+                metadata.get("collection_name")
+                or metadata.get("ic_id")
+                or nested_metadata.get("collection_name")
+                or nested_metadata.get("collection")
+                or self.vector_rag.collection_name
+            )
+            vector_docs_by_collection.setdefault(collection_name, []).extend(
+                {**metadata, "content": chunk} for chunk in chunks
+            )
             # Build graph nodes only if GraphRAG is enabled
             if self.graphrag_enabled:
                 all_nodes.extend(self._build_graph_nodes(text, metadata))
 
-        if all_vector_docs:
-            self.vector_rag.add_document(all_vector_docs)
+        for collection_name, vector_docs in vector_docs_by_collection.items():
+            if vector_docs:
+                self.vector_rag.add_document(
+                    vector_docs,
+                    collection_name=collection_name,
+                )
 
         # Add to GraphRAG only if enabled
         if self.graphrag_enabled and all_nodes:

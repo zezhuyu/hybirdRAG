@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 import tempfile
 import os
+import re
 
 # Load .env file before anything else
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from HybirdRAG.pipeline import HybridRAGPipeline
+from HybirdRAG.VectorRAG.pipeline import normalize_collection_name
 from HybirdRAG.load_pdf import extract_full_text, prepare_single_document
 from clean import (
     clear_all_databases,
@@ -84,6 +86,12 @@ class Document(BaseModel):
 class DocumentsRequest(BaseModel):
     """Request model for adding multiple documents."""
     documents: List[Document] = Field(..., description="List of documents to add")
+
+
+class CollectionCreateRequest(BaseModel):
+    """Request model for creating a Milvus collection."""
+    collection_name: Optional[str] = Field(None, description="Milvus collection name")
+    name: Optional[str] = Field(None, description="Alias accepted by QuickTA")
 
 
 class QueryRequest(BaseModel):
@@ -159,6 +167,25 @@ async def document_status(
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get document status: {str(e)}"
+        ) from e
+
+
+@app.post("/api/v1/collections", tags=["Collections"], status_code=http_status.HTTP_201_CREATED)
+async def create_collection(request: CollectionCreateRequest):
+    """Create and load a Milvus collection with the standard HybirdRAG schema."""
+    requested_name = (request.collection_name or request.name or "").strip()
+    if not requested_name:
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="collection_name is required")
+    collection_name = normalize_collection_name(requested_name)
+
+    try:
+        pipeline = get_pipeline()
+        pipeline.vector_rag.ensure_collection(collection_name)
+        return {"success": True, "collection_name": collection_name}
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create collection '{collection_name}': {str(e)}",
         ) from e
 
 

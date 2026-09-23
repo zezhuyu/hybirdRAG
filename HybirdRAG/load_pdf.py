@@ -130,7 +130,7 @@ def prepare_single_document(
         "source_path": str(source_path.resolve()),
     }
     if collection_name:
-        doc["metadata"] = {"collection": collection_name}
+        doc["collection_name"] = collection_name
     return [doc]
 
 
