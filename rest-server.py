@@ -105,6 +105,7 @@ class QueryRequest(BaseModel):
     rerank: bool = Field(True, description="Enable reranking")
     compress: bool = Field(False, description="Enable result compression")
     limit: int = Field(30, description="Maximum number of results")
+    collection_name: Optional[str] = Field(None, description="Milvus collection to query")
 
 
 class QueryResponse(BaseModel):
@@ -160,8 +161,16 @@ async def document_status(
         coll = collection_name or vr.collection_name
         if not vr.milvus.has_collection(collection_name=coll):
             return {"collection_name": coll, "document_count": 0}
-        stats = vr.milvus.get_collection_stats(collection_name=coll)
-        count = int(stats.get("row_count", 0))
+        # Milvus get_collection_stats(row_count) can lag after async inserts.
+        # Query the loaded collection for primary keys so status matches the
+        # same data path used by /documents and retrieval.
+        rows = vr.milvus.query(
+            collection_name=coll,
+            filter="",
+            output_fields=["id"],
+            limit=16383,
+        )
+        count = len(rows or [])
         return {"collection_name": coll, "document_count": count}
     except Exception as e:
         raise HTTPException(
@@ -386,6 +395,14 @@ async def upload_document(
     - count: Number of documents (1; full text is sent to the chunker for chunking)
     """
     try:
+        requested_collection = (collection_name or "").strip()
+        if not requested_collection:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail="collection_name is required for PDF uploads; choose a target collection",
+            )
+        collection_name = normalize_collection_name(requested_collection)
+
         # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             raise HTTPException(
@@ -520,7 +537,8 @@ async def query(request: QueryRequest):
             context_chunk_size=request.context_chunk_size,
             rerank=rerank,
             compress=compress,
-            limit=request.limit
+            limit=request.limit,
+            collection_name=request.collection_name,
         )
         
         # Ensure results is a list
@@ -545,7 +563,8 @@ async def query_get(
     broaden_query: bool = True,
     rerank: bool = True,
     compress: bool = False,
-    limit: int = 30
+    limit: int = 30,
+    collection_name: Optional[str] = None,
 ):
     """
     Simple GET endpoint for querying (convenience method).
@@ -571,7 +590,8 @@ async def query_get(
             broaden_query=broaden_query,
             rerank=rerank_val,
             compress=compress_val,
-            limit=limit
+            limit=limit,
+            collection_name=collection_name,
         )
         
         if not isinstance(results, list):
@@ -816,4 +836,3 @@ if __name__ == "__main__":
         port=args.port,
         reload=args.reload
     )
-
